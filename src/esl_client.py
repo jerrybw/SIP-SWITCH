@@ -1,0 +1,1054 @@
+"""FreeSWITCH ESL 客户端：订阅事件 -> 更新内存通话状态 -> HANGUP 落 CDR。
+
+注意：
+- 本文件是 M1 T-103 骨架。路由/规则校验/故障切换/并发限制（M2 R-201~T-208）
+  会接管更复杂的状态机，这里只保证「接通后通话能产出一条符合 PRD §7 口径的 CDR」。
+- FS 事件的 header 名随版本略有差异，生产环境需对 variable_*/Event-Date-Timestamp
+  实际取值做一次校准（建议用 fs_cli `event plain CHANNEL_HANGUP_COMPLETE` 抓样本）。
+- Event-Date-Timestamp 为 Unix 微秒，见 _parse_ts。
+- P2（T-206 前置）：在事件流上维护三档实时并发计数器 `_conc`
+  （global / 接入点 / 落地网关），供出局并发预检与 `/api/stats/concurrency` 使用。
+"""
+import threading
+import json
+import os
+import glob
+import time
+from datetime import datetime
+from math import ceil
+from decimal import Decimal
+
+from ESL import ESLconnection
+
+from core.config import settings
+from db.session import SessionLocal
+from db.models import Cdr, SipPhone, AccessPoint, Account, Business, Gateway, Carrier, AccountLedger, CarrierLedger
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+ESL_CFG = settings["esl"]
+
+# call_uuid -> 通话状态。M2 路由引擎会替换为更完整状态机。
+_call_store: dict[str, dict] = {}
+_store_lock = threading.Lock()
+
+# P2 实时并发计数器（T-206 前置）：三档原子计数。
+#   global = 全局并发；ap/gw = owner_id -> 并发数（接入点/落地网关维度）。
+# 计数口径：仅对主(A)腿计数，下游(B)腿合并不双计；cdr_* 通道变量到达即补计 ap/gw。
+_conc: dict = {"global": 0, "ap": {}, "gw": {}}
+_conc_lock = threading.Lock()
+
+
+def _parse_ts(value):
+    """FS Event-Date-Timestamp 为 Unix 微秒字符串。"""
+    try:
+        if not value:
+            return None
+        ts = float(value)
+        if ts > 1e12:
+            ts /= 1e6
+        return datetime.utcfromtimestamp(ts)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(v):
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_switch_detail(raw):
+    """T-205：把网关下发的扁平串 ';gid:num:cause;gid:num:cause' 解析为 JSON 数组入库。
+
+    元素：{gateway_id, callee_out, cause}；cause=WIN 表示该腿接通胜出。
+    rec.get("switch_detail") 可能是原始扁平串或已解析的 list/dict（幂等）。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (list, dict)):
+        return raw
+    s = raw.strip().lstrip(";")
+    if not s:
+        return None
+    out = []
+    for part in s.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        seg = part.split(":", 2)
+        gid = seg[0] if len(seg) > 0 else None
+        num = seg[1] if len(seg) > 1 else None
+        cause = seg[2] if len(seg) > 2 else None
+        out.append({
+            "gateway_id": int(gid) if gid and gid.isdigit() else gid,
+            "callee_out": num,
+            "cause": cause,
+        })
+    return out if out else None
+
+
+def _upsert_call(call_uuid: str, **fields):
+    with _store_lock:
+        rec = _call_store.setdefault(call_uuid, {"uuid": call_uuid})
+        rec.update(fields)
+
+
+def _maybe_count_leg(leg_uuid: str) -> None:
+    """对主(A)腿做一次并发计数（幂等，靠 _counted_* 标志防止重复）：
+    - global 必定 +1；
+    - 若该腿已带 cdr_access_point_id / cdr_gateway_id 则对应维度 +1
+      （cdr_* 变量可能迟到，在后续携带该变量的事件里补计）。
+    """
+    rec = _call_store.get(leg_uuid)
+    if rec is None:
+        return
+    # 被合并的下游(B)腿不计数（防 A-leg 已先挂断 pop 后 B-leg HANGUP 误判）。
+    if rec.get("_merged_into"):
+        return
+    with _conc_lock:
+        if not rec.get("_counted_global"):
+            _conc["global"] += 1
+            rec["_counted_global"] = True
+        ap = rec.get("access_point_id")
+        if ap and not rec.get("_counted_ap"):
+            _conc["ap"][ap] = _conc["ap"].get(ap, 0) + 1
+            rec["_counted_ap"] = True
+        gw = rec.get("gateway_id")
+        if gw and not rec.get("_counted_gw"):
+            _conc["gw"][gw] = _conc["gw"].get(gw, 0) + 1
+            rec["_counted_gw"] = True
+
+
+def _dec_count_leg(rec: dict) -> None:
+    """主(A)腿挂断时按已计维度 -1（与 _maybe_count_leg 对称）。"""
+    with _conc_lock:
+        if rec.get("_counted_global"):
+            _conc["global"] = max(0, _conc["global"] - 1)
+        ap = rec.get("access_point_id")
+        if ap and rec.get("_counted_ap"):
+            _conc["ap"][ap] = max(0, _conc["ap"].get(ap, 0) - 1)
+            if _conc["ap"][ap] <= 0:
+                _conc["ap"].pop(ap, None)
+        gw = rec.get("gateway_id")
+        if gw and rec.get("_counted_gw"):
+            _conc["gw"][gw] = max(0, _conc["gw"].get(gw, 0) - 1)
+            if _conc["gw"][gw] <= 0:
+                _conc["gw"].pop(gw, None)
+
+
+def get_concurrency() -> dict:
+    """供 app.py 并发预检与 /api/stats/concurrency 查询的快照。"""
+    with _conc_lock:
+        return {"global": _conc["global"], "ap": dict(_conc["ap"]), "gw": dict(_conc["gw"])}
+
+
+def _debug_dump(leg_uuid, rec, event):
+    """T-207 诊断：把 A-leg HANGUP 时的关键变量落盘，便于通道变量偶发缺失时定位。"""
+    try:
+        with open("/tmp/sip_gw_debug.log", "a") as f:
+            f.write(
+                "HANGUP_A leg=%s gw=%r ca=%r ap=%r bu=%r rec=%r\n"
+                % (
+                    leg_uuid,
+                    event.getHeader("variable_cdr_gateway_id"),
+                    event.getHeader("variable_cdr_carrier_id"),
+                    event.getHeader("variable_cdr_access_point_id"),
+                    event.getHeader("variable_cdr_bill_unit"),
+                    event.getHeader("variable_rec_file")
+                    or event.getHeader("variable_record_path")
+                    or event.getHeader("variable_record_file"),
+                )
+            )
+            f.write("  rec_keys=%s\n" % sorted(rec.keys()))
+            f.write(
+                "  rec_gw=%r rec_ca=%r rec_ap=%r rec_path=%r rec_status=%r\n"
+                % (
+                    rec.get("gateway_id"),
+                    rec.get("carrier_id"),
+                    rec.get("access_point_id"),
+                    rec.get("record_path"),
+                    rec.get("record_status"),
+                )
+            )
+    except Exception:
+        pass
+
+
+def handle_event(event) -> None:
+    if event.getHeader("Event-Name") == "CUSTOM":
+        _handle_sofia_reg(event)
+        return
+    etype = event.getHeader("Event-Name")
+    # 用 Unique-ID 作为通道唯一键（最可靠），variable_call_uuid 仅兜底。
+    leg_uuid = event.getHeader("Unique-ID") or event.getHeader("variable_call_uuid")
+    if not leg_uuid:
+        return
+    # 桥接产生的下游(B)腿会带 Other-Leg-Unique-ID 指向主(A)腿。
+    other_uuid = event.getHeader("Other-Leg-Unique-ID")
+    # P2：判定当前事件是否属于「被合并的下游(B)腿」——B 腿的 Other-Leg 指向主(A)腿
+    # （且 A 腿不是 merged 记录）。B 腿不计入并发，避免 A/B 双计。
+    is_b_leg = (
+        bool(other_uuid)
+        and other_uuid != leg_uuid
+        and other_uuid in _call_store
+        and not _call_store.get(other_uuid, {}).get("_merged_into")
+    )
+
+    # T-207：路由贯通变量(cdr_*)与录音路径(rec_file)由 dialplan 经 `set` 写在 A-leg 上，
+    # B-leg 不继承。任一事件只要携带它们就缓存进 _call_store，并同步给对端腿，
+    # 避免依赖 HANGUP 事件一定携带这些变量（实测 A-leg HANGUP 偶发不含 variable_*）。
+    cdr_gw = _safe_int(event.getHeader("variable_cdr_gateway_id"))
+    cdr_ca = _safe_int(event.getHeader("variable_cdr_carrier_id"))
+    cdr_ap = _safe_int(event.getHeader("variable_cdr_access_point_id"))
+    cdr_acct = _safe_int(event.getHeader("variable_cdr_account_id"))  # 拦截呼叫显式下发的归属账户
+    cdr_bu = _safe_int(event.getHeader("variable_cdr_bill_unit"))
+    cdr_sc = _safe_int(event.getHeader("variable_cdr_switch_count"))
+    cdr_ct = event.getHeader("variable_cdr_caller_type")
+    cdr_dip = event.getHeader("variable_cdr_dst_ip")
+    cdr_dport = _safe_int(event.getHeader("variable_cdr_dst_port"))
+    cdr_cmid = event.getHeader("variable_cdr_caller_mid")
+    cdr_ccmid = event.getHeader("variable_cdr_callee_mid")
+    cdr_sd = event.getHeader("variable_cdr_switch_detail")  # T-205：故障切换尝试序列(扁平串)
+    rec_file = (
+        event.getHeader("variable_record_path")
+        or event.getHeader("variable_record_file")
+        or event.getHeader("variable_rec_file")
+    )
+    if (
+        cdr_gw is not None
+        or cdr_ca is not None
+        or cdr_ap is not None
+        or cdr_acct is not None
+        or cdr_bu is not None
+        or cdr_sc is not None
+        or cdr_sd
+        or rec_file
+        or cdr_dip is not None
+        or cdr_dport is not None
+        or cdr_cmid is not None
+        or cdr_ccmid is not None
+    ):
+        _upsert_call(
+            leg_uuid,
+            gateway_id=cdr_gw,
+            carrier_id=cdr_ca,
+            access_point_id=cdr_ap,
+            account_id=cdr_acct,
+            bill_unit=cdr_bu or 60,
+            switch_count=cdr_sc,
+            caller_type=cdr_ct,
+            dest_ip=cdr_dip,
+            dest_port=cdr_dport,
+            caller_mid=cdr_cmid,
+            callee_mid=cdr_ccmid,
+            switch_detail=cdr_sd,
+        )
+        if rec_file:
+            _upsert_call(leg_uuid, record_status=1, record_path=rec_file)
+        # 同步给对端腿（被合并的 B-leg），保证其落库前也能带上这些值。
+        if other_uuid and other_uuid != leg_uuid:
+            _upsert_call(
+                other_uuid,
+                gateway_id=cdr_gw,
+                carrier_id=cdr_ca,
+                access_point_id=cdr_ap,
+                account_id=cdr_acct,
+                bill_unit=cdr_bu or 60,
+                dest_ip=cdr_dip,
+                dest_port=cdr_dport,
+                caller_mid=cdr_cmid,
+                callee_mid=cdr_ccmid,
+                switch_detail=cdr_sd,
+            )
+            if rec_file:
+                _upsert_call(other_uuid, record_status=1, record_path=rec_file)
+        # P2 并发计数：仅对主(A)腿计数，下游(B)腿跳过（避免双计）。
+        if not is_b_leg:
+            _maybe_count_leg(leg_uuid)
+
+    # 网关在拒绝时写入的通道变量，随事件透传，落 CDR.reject_reason。
+    reject_reason = event.getHeader("variable_sip_gateway_reject_reason")
+    if reject_reason:
+        _upsert_call(leg_uuid, reject_reason=reject_reason)
+
+    if etype == "CHANNEL_CREATE":
+        # 下游(B)腿：把它的主被叫记为主腿的「呼出主被叫」，并把自身标记为已合并，
+        # 避免 B 腿 HANGUP 再落一条 CDR（PRD R-602 一条通话一条 CDR）。
+        if other_uuid and other_uuid != leg_uuid and other_uuid in _call_store:
+            _upsert_call(
+                other_uuid,
+                caller_out=event.getHeader("Caller-Caller-ID-Number"),
+                callee_out=event.getHeader("Caller-Destination-Number"),
+            )
+            with _store_lock:
+                _call_store[leg_uuid] = {"uuid": leg_uuid, "_merged_into": other_uuid}
+            return
+        _upsert_call(
+            leg_uuid,
+            source_ip=event.getHeader("variable_sip_network_ip"),
+            source_port=_safe_int(event.getHeader("variable_sip_network_port")),
+            start_time=_parse_ts(event.getHeader("Event-Date-Timestamp")),
+            caller_in=event.getHeader("Caller-Caller-ID-Number"),
+            callee_in=event.getHeader("Caller-Destination-Number"),
+        )
+        print("[esl-create] leg=%s caller=%r callee=%r requri=%r" % (
+            leg_uuid,
+            event.getHeader("Caller-Caller-ID-Number"),
+            event.getHeader("Caller-Destination-Number"),
+            event.getHeader("variable_sip_req_uri")), flush=True)
+        # P2：确保主(A)腿至少计入 global（ap/gw 待 cdr_* 变量到达后补计）。
+        _maybe_count_leg(leg_uuid)
+    elif etype in ("CHANNEL_PROGRESS", "CHANNEL_PROGRESS_MEDIA"):
+        # 180 / 183 均记为振铃时间（PRD：收到 180/183 即记）
+        _upsert_call(leg_uuid, ring_time=_parse_ts(event.getHeader("Event-Date-Timestamp")))
+    elif etype == "CHANNEL_ANSWER":
+        _upsert_call(leg_uuid, answer_time=_parse_ts(event.getHeader("Event-Date-Timestamp")))
+    elif etype == "CHANNEL_BRIDGE":
+        # 出局段主被叫写回主(A)腿（若有对端），否则写本腿。
+        target = other_uuid if (other_uuid and other_uuid in _call_store) else leg_uuid
+        _upsert_call(
+            target,
+            caller_out=event.getHeader("Caller-Caller-ID-Number"),
+            callee_out=event.getHeader("Caller-Destination-Number"),
+        )
+    elif etype == "CHANNEL_HANGUP_COMPLETE":
+        with _store_lock:
+            rec = _call_store.get(leg_uuid)
+        if rec is None:
+            # 403 等早期拒绝（CS_NEW 无 CHANNEL_CREATE 写入）：用事件头落 minimal CDR
+            ctx = {}
+            try:
+                from api.directory_xml import _sip_call_ctx
+                cid = event.getHeader("variable_sip_call_id") or event.getHeader("sip_call_id")
+                ctx = _sip_call_ctx.get(cid) or {}
+            except Exception:
+                cid = None
+            rec = {
+                "uuid": leg_uuid,
+                "caller_in": (event.getHeader("Caller-Caller-ID-Number")
+                              or event.getHeader("Caller-Username")
+                              or event.getHeader("variable_sip_from_user")
+                              or ctx.get("caller") or ""),
+                "callee_in": (event.getHeader("Caller-Destination-Number")
+                              or event.getHeader("variable_sip_req_user")
+                              or event.getHeader("variable_sip_to_user")
+                              or ctx.get("callee") or ""),
+                "source_ip": event.getHeader("variable_sip_network_ip"),
+                "source_port": _safe_int(event.getHeader("variable_sip_network_port")),
+                "start_time": _parse_ts(event.getHeader("Event-Date-Timestamp")),
+            }
+            try:
+                _nm = [h for h in event.getHeaderNames()
+                       if "sip" in h.lower() or "dest" in h.lower() or "call" in h.lower()]
+                print("[esl403] leg=%s cid=%r ctx=%r heads=%s" % (
+                    leg_uuid, cid, ctx, {h: event.getHeader(h) for h in _nm}), flush=True)
+            except Exception:
+                pass
+            _save_cdr(leg_uuid, rec, event)
+            return
+        # 下游(B)腿：不落库，直接丢弃。结束时间以主(A)腿自身 HANGUP 时间戳为准，
+        # 不再回填 B 腿时间——故障切换会产生多个 B 腿，首个失败腿的挂断时间早于真实
+        # 应答时间，回填会把 end_time 污染成「呼叫开始时间」（见 84c2d228 案例）。
+        if rec.get("_merged_into"):
+            with _store_lock:
+                _call_store.pop(leg_uuid, None)
+            return
+        # 主(A)腿落库；cdr_* 与录音路径已在上方 capture 块缓存进 rec，直接沿用。
+        _debug_dump(leg_uuid, rec, event)
+        # P2：主(A)腿挂断，按已计维度减计并发。
+        _dec_count_leg(rec)
+        with _store_lock:
+            _call_store.pop(leg_uuid, None)
+        _save_cdr(leg_uuid, rec, event)
+
+
+def _hangup_direction(rec: dict, event) -> int:
+    """话单挂断方向（2026-09-03 用户规则）：0=服务器 / 1=主叫 / 2=被叫 / 3=其他。
+
+    A 腿 HANGUP_COMPLETE 事件 best-effort 判定：
+    - 接通后：A 腿收到主叫 BYE(sip_hangup_disposition/term 含 recv_bye) → 主叫(1)；
+      bridge 由对端(被叫)结束、A 腿被收尾挂断 → 被叫(2)。（平台暂无接通后服务器主动
+      拆线操作；如后续加管理拆线再按 send_bye 细分 0。）
+    - 未接通：规则拒绝(reject_reason)/CALL_REJECTED(603)/NO_ROUTE/未出局 → 服务器(0)；
+      出局振铃中 ORIGINATOR_CANCEL → 主叫取消(1)；其余出局后被叫异常信令/拆线 → 被叫(2)。
+    兜底 3(其他)基本不触发。样本可再校准。
+    """
+    cause = (event.getHeader("Hangup-Cause") or "").upper()
+    disp = ((event.getHeader("variable_sip_hangup_disposition") or "")
+            + " " + (event.getHeader("variable_sip_term_status") or "")).lower()
+    answered = bool(rec.get("answer_time"))
+    if answered:
+        if "recv_bye" in disp:
+            return 1  # 主叫 BYE
+        return 2      # 对端(被叫)先挂 / bridge 结束
+    if rec.get("reject_reason"):
+        return 0      # 业务规则拒绝 → 服务器
+    if cause in ("CALL_REJECTED", "NO_ROUTE_DESTINATION"):
+        return 0      # 限制 603 / 无路由 → 服务器
+    if not (rec.get("gateway_id") or rec.get("callee_out") or rec.get("switch_detail")):
+        return 0      # 未出局：服务器未路由成功 / 并发 503 等
+    if cause == "ORIGINATOR_CANCEL":
+        return 1      # 出局振铃中主叫取消
+    return 2          # 出局后被叫异常信令 / 被叫拆线
+
+
+def _save_cdr(call_uuid: str, rec: dict, event) -> None:
+    # 结束时间以主(A)腿自身 HANGUP 事件时间戳为准（B 腿已不回填，见 handle_event），
+    # 仅当事件时间戳缺失时才回退 rec 里可能残留的 end_time。
+    end_time = _parse_ts(event.getHeader("Event-Date-Timestamp")) or rec.get("end_time")
+    talk = None
+    bill = 0
+    if rec.get("answer_time") and end_time:
+        talk = int((end_time - rec["answer_time"]).total_seconds())
+        bill_unit = rec.get("bill_unit") or 60
+        if talk > 0:
+            bill = ceil(talk / bill_unit) * bill_unit
+
+    # v0.3：当通消费(收入侧) + 当通成本(成本侧) + 账户维度解析（仅接通计费；费率链见 _compute_billing）
+    cost, rate_used, account_id, business_id, customer_id, cost_price, cost_rate_used, cost_bill_unit = _compute_billing(rec, talk, bill)
+    # dialplan 阶段拦截（预付费余额不足 603 等）显式下发 cdr_account_id：无 bridge、_compute_billing
+    # 无从按接入点推导账户，故此处以显式值为准（正常路由呼叫不会下发该变量，回落到推导值）。
+    if rec.get("account_id") is not None:
+        account_id = rec.get("account_id")
+
+    # T-205：switch_detail = 全部尝试过的网关腿序列(含胜出腿)；真实切换次数 =
+    # 腿数 - 1（非「失败腿数」）。网关下发的 cdr_switch_count(=gw_failover_count)
+    # 是「失败腿数」，语义不对，故这里以 switch_detail 条数反推，二者不一致时以条数为准。
+    #
+    # 胜出腿兜底（d08211a7 主叫先挂场景）：成功接通（A 腿已 answer）但 detail 缺 WIN 段——
+    # 主叫先挂时 A 腿自身先进入 HANGUP，bridge 后置 set 无机会执行（FS 通道挂断后不再跑
+    # dialplan），WIN 只能在此兜底：A 腿 cdr_gateway_id/callee_out 的最后一次赋值即胜出
+    # 网关（head_sets 每腿覆盖 + CHANNEL_BRIDGE 写被叫）。被叫挂场景 dialplan 已记 WIN →
+    # 有 WIN 段则跳过（幂等）；全失败场景 answer_time 为空 → 不补。
+    switch_detail = _parse_switch_detail(rec.get("switch_detail"))
+    if (
+        rec.get("answer_time")
+        and rec.get("gateway_id")
+        and rec.get("callee_out")
+        and not (
+            isinstance(switch_detail, list)
+            and any(isinstance(d, dict) and d.get("cause") == "WIN" for d in switch_detail)
+        )
+    ):
+        if not isinstance(switch_detail, list):
+            switch_detail = []
+        switch_detail = switch_detail + [{
+            "gateway_id": int(rec["gateway_id"])
+            if isinstance(rec["gateway_id"], int)
+            else rec["gateway_id"],
+            "callee_out": rec["callee_out"],
+            "cause": "WIN",
+        }]
+    switch_count = (
+        len(switch_detail) - 1
+        if isinstance(switch_detail, list)
+        else (rec.get("switch_count") or 0)
+    )
+
+    cdr = Cdr(
+        uuid=call_uuid,
+        caller_in=rec.get("caller_in") or "",
+        callee_in=rec.get("callee_in") or "",
+        caller_mid=rec.get("caller_mid"),
+        callee_mid=rec.get("callee_mid"),
+        caller_out=rec.get("caller_out"),
+        callee_out=rec.get("callee_out"),
+        start_time=rec.get("start_time"),
+        ring_time=rec.get("ring_time"),
+        answer_time=rec.get("answer_time"),
+        end_time=end_time,
+        talk_duration=talk,
+        bill_unit=rec.get("bill_unit", 60),
+        bill_duration=bill,
+        gateway_id=rec.get("gateway_id"),
+        carrier_id=rec.get("carrier_id"),
+        access_point_id=rec.get("access_point_id"),
+        customer_id=customer_id,
+        account_id=account_id,
+        business_id=business_id,
+        source_ip=rec.get("source_ip"),
+        source_port=rec.get("source_port"),
+        dest_ip=rec.get("dest_ip"),
+        dest_port=rec.get("dest_port"),
+        # caller_type 列 NOT NULL DEFAULT ''；rec 中该字段可能未下发(为 None)，
+        # 显式传 None 会触发 IntegrityError 且 DB 默认不生效，故兜底为空串。
+        caller_type=rec.get("caller_type") or "",
+        hangup_cause=event.getHeader("Hangup-Cause"),
+        hangup_direction=_hangup_direction(rec, event),
+        sip_code=_safe_int(
+            event.getHeader("variable_sip_term_status")
+            or event.getHeader("variable_sip_invite_failure_status")
+        ),
+        sip_invite_failure_status=event.getHeader("variable_sip_invite_failure_status"),
+        reject_reason=rec.get("reject_reason"),
+        switch_count=switch_count,
+        switch_detail=switch_detail,
+        record_status=rec.get("record_status", 0),
+        record_path=rec.get("record_path"),
+        cost=cost,
+        rate_used=rate_used,
+        # v0.3 成本侧落库（与收入同事务算出）
+        cost_price=cost_price,
+        cost_rate_used=cost_rate_used,
+        cost_bill_unit=cost_bill_unit,
+        profit=cost - cost_price,
+        # billed 列 NOT NULL DEFAULT 0；显式传 0，避免 getattr 未赋值时为 None → IntegrityError(1048)，
+        # 导致 _persist_cdr 全列构造 vals 时把 None 写进 INSERT（DEFAULT 仅在列被省略时生效）。
+        billed=0,
+        fs_node_uuid=ESL_CFG.get("fs_node_uuid"),
+        created_at=datetime.utcnow(),
+    )
+
+    # T-208 (R-608): 落库失败重试 + 主库故障暂存磁盘，不得静默丢失
+    if not _persist_cdr(cdr):
+        _spool_cdr(cdr)
+    else:
+        # v0.3 预付费：落库成功后扣费（仅在接通且消费>0 且未扣过）。三道防重扣闸见 _charge_account。
+        # 仅当「预付费开关」开启时挪动余额：开关关闭（停机窗口启用前/验证期）只做成本归集与报表，
+        # 不扣余额、不写扣费流水，与 §5.5 第 3 步「余额校验（预付费开关开启时）」语义一致（fail-open 监控）。
+        try:
+            if settings.get("prepaid_enabled", False) and rec.get("answer_time") and cost and cost > 0:
+                _charge_account(cdr.uuid, cost)
+        except Exception as e:
+            print("[billing] charge account failed (uuid=%s): %s" % (cdr.uuid, e))
+        # v0.3.1 成本侧：运营商余额扣减（**始终扣费**，不依赖 prepaid_enabled，不拦截）。
+        # 仅接通且成本>0 且有运营商归属才扣；防重扣靠 carrier_ledger.uk_carrier_ledger_cdr 唯一键。
+        try:
+            if rec.get("answer_time") and cost_price and cost_price > 0 and rec.get("carrier_id"):
+                _charge_carrier(cdr.uuid, cost_price)
+        except Exception as e:
+            print("[billing] charge carrier failed (uuid=%s): %s" % (cdr.uuid, e))
+
+
+class ESLClient:
+    def __init__(self):
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                con = ESLconnection(ESL_CFG["host"], ESL_CFG["port"], ESL_CFG["password"])
+                if not con.connected():
+                    print("[ESL] connect failed, retry in %ss" % ESL_CFG.get("reconnect_interval", 3))
+                    time_sleep(ESL_CFG.get("reconnect_interval", 3))
+                    continue
+                print("[ESL] connected")
+                con.events(
+                    "plain",
+                    "CHANNEL_CREATE CHANNEL_PROGRESS CHANNEL_PROGRESS_MEDIA "
+                    "CHANNEL_ANSWER CHANNEL_BRIDGE CHANNEL_HANGUP_COMPLETE "
+                    "CUSTOM sofia::register sofia::expire",
+                )
+                while not self._stop.is_set():
+                    ev = con.recvEvent()
+                    if ev is None:
+                        break  # 断线，重连
+                    try:
+                        handle_event(ev)
+                    except Exception as e:  # noqa: BLE001
+                        print("[ESL] handle error:", e)
+                con.disconnect()
+            except Exception as e:  # noqa: BLE001
+                print("[ESL] loop error:", e)
+                time_sleep(ESL_CFG.get("reconnect_interval", 3))
+
+
+def time_sleep(secs):
+    import time
+    time.sleep(secs)
+def _persist_cdr(cdr, attempts=3):
+    """落库（T-208）：基于 cdr.uuid 的 MySQL upsert，重复事件/重灌幂等，不双插。"""
+    vals = {c.name: getattr(cdr, c.name) for c in cdr.__table__.columns}
+    return _upsert_cdr_dict(vals, attempts)
+
+
+def _upsert_cdr_dict(vals: dict, attempts=3):
+    """T-208/T-计费：MySQL upsert（ON DUPLICATE KEY UPDATE）。
+
+    重复事件 / reaper 重灌均幂等：冲突时按 uuid 更新（排除 id/uuid/created_at，保留原始创建时间），
+    cost 随 CDR 一起算好，重灌不会重算也不会双计。
+    """
+    cols = [c.name for c in Cdr.__table__.columns]
+    # NOT NULL 列兜底：DB 已标 NOT NULL DEFAULT 的列若 vals 显式传 None 会触发 IntegrityError(1048)
+    # 且 DEFAULT 不生效（默认仅在列被省略时生效）。覆盖 _save_cdr 构造遗漏与 reaper 重灌（旧 spool
+    # 里 billed=None）两条路径。billed 是 v0.3 新增后曾导致全部 CDR 落库失败的根因。
+    _nn_defaults = {
+        "billed": 0,
+        "cost": 0, "cost_price": 0, "profit": 0,
+        "bill_unit": 60, "bill_duration": 0,
+        "switch_count": 0, "record_status": 0,
+        "hangup_direction": 0, "caller_type": "",
+    }
+    for _k, _d in _nn_defaults.items():
+        if vals.get(_k) is None:
+            vals[_k] = _d
+    for i in range(attempts):
+        db = SessionLocal()
+        try:
+            stmt = mysql_insert(Cdr).values(**vals)
+            upd = {c: stmt.inserted[c] for c in cols if c not in ("id", "uuid", "created_at")}
+            stmt = stmt.on_duplicate_key_update(**upd)
+            db.execute(stmt)
+            db.commit()
+            return True
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print('[CDR] upsert attempt %d failed:' % (i + 1), e)
+            time.sleep(0.5)
+        finally:
+            db.close()
+    return False
+
+
+def _spool_cdr(cdr):
+    try:
+        spool = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'cdr_spool')
+        os.makedirs(spool, exist_ok=True)
+        path = os.path.join(spool, cdr.uuid + '.json')
+        data = {c.name: getattr(cdr, c.name) for c in cdr.__table__.columns}
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, default=str, ensure_ascii=False)
+        print('[CDR] SPOOLED', path)
+    except Exception as e:
+        print('[CDR] SPOOL FAILED, CDR LOST:', e)
+
+
+# T-计费 内存费率缓存（key -> (过期时间戳, 值)），TTL 60s，避免每通查库。
+_RATE_CACHE = {}
+_RATE_TTL = 60.0
+
+
+def _rate_cache_get(key):
+    v = _RATE_CACHE.get(key)
+    if v and v[0] > time.time():
+        return v[1]
+    return None
+
+
+def _rate_cache_set(key, val):
+    _RATE_CACHE[key] = (time.time() + _RATE_TTL, val)
+
+
+def clear_rate_cache():
+    """T-计费：费率变更后立即失效内存缓存，下通呼叫按新费率算（避免 60s TTL 内仍用旧值）。"""
+    _RATE_CACHE.clear()
+
+
+def _eff_rate(v):
+    """费率链取值：NULL 或 <= 0 一律视为「本层未配置」，继续向下一级回落。
+
+    ⚠️ 为什么 0 也算未配置：管理端 collectForm 对 number 类型输入框，留空会提交成 0
+    （而非 NULL），于是「从未填过费率」的话机/接入点在库里是 0.0000。若把 0 当有效费率，
+    费率链会在话机层就被「免费」截断，账户兜底费率永远不生效（用户实测 uuid
+    f7f26d2b… 即此问题：话机 80015432 rate=0.0000 → 本应回落账户 sss 的 0.0110）。
+
+    业务上 0 元/计费单位不是有意义的费率；真要「免费」，在最兜底的那一级（账户 / 运营商）
+    留空或填 0 即可——链路走到底同样不计费。
+    """
+    if v is None:
+        return None
+    try:
+        d = Decimal(str(v))
+    except Exception:
+        return None
+    return None if d <= 0 else d
+
+
+def _compute_billing(rec, talk, bill):
+    """v0.3：算当通消费(收入侧) + 当通成本(成本侧)并解析账户维度。
+
+    返回 (cost, rate_used, account_id, business_id, customer_id, cost_price, cost_rate_used, cost_bill_unit)。
+
+    收入侧费率链：话机.rate → 接入点.rate → 账户.rate；任一级为 NULL 或 <= 0 视为未配置，
+                 继续回落下一级（见 _eff_rate）；仅接通计费。
+    成本侧链：gateway.cost_rate → carrier.cost_rate；**成本侧使用独立的计费单位**(gateway/carrier.bill_unit)，
+             与收入侧接入点 bill_unit 解耦；仅接通计费。
+    """
+    ap_id = rec.get("access_point_id")
+    cost = Decimal("0")
+    rate_used = None
+    account_id = business_id = customer_id = None
+    ap_rate = account_rate = None
+
+    # 1) 接入点维度：一次 join 取 business_id/account_id/customer_id 与接入点/账户费率。
+    #    v0.3 多租户：接入点直挂账户（AccessPoint.account_id），不再经 Business 中转。
+    #    注意：话机注册呼叫**没有接入点**，此处会跳过，由第 3 步按话机归属兜底。
+    if ap_id:
+        row = _rate_cache_get("ap_%d" % ap_id)
+        if row is None:
+            db = SessionLocal()
+            try:
+                row = db.execute(
+                    select(AccessPoint.business_id, AccessPoint.account_id, AccessPoint.rate,
+                           Account.customer_id, Account.rate)
+                    .join(Account, Account.id == AccessPoint.account_id)
+                    .where(AccessPoint.id == ap_id)
+                ).first()
+            except Exception as e:
+                print("[billing] ap resolve failed:", e)
+                row = None
+            finally:
+                db.close()
+            if row is not None:
+                _rate_cache_set("ap_%d" % ap_id, row)
+        if row is not None:
+            business_id, account_id, ap_rate, customer_id, account_rate = row
+
+    # 2) 话机维度：取本通关联话机的费率与归属账户（主叫优先）。
+    #    同时为第 3 步提供归属兜底；查询不再限定 rate 非空，否则 rate 为 NULL 的话机
+    #    连账户都解析不到（多租户下归属比费率更基础）。
+    phone_rate = phone_account = None
+    mids = [m for m in (rec.get("caller_mid"), rec.get("callee_mid")) if m]
+    if mids:
+        pk = "ph_" + "|".join(str(m) for m in mids)
+        cached = _rate_cache_get(pk)
+        if cached is None:
+            db = SessionLocal()
+            try:
+                rows = db.execute(
+                    select(SipPhone.phone_number, SipPhone.rate, SipPhone.account_id)
+                    .where(SipPhone.phone_number.in_(mids))
+                ).all()
+                by_num = {str(r[0]): (r[1], r[2]) for r in rows}
+                # 主叫优先：双向均命中（内线互拨）时以主叫话机为准；
+                # 旧实现用 .first() 取 in_(mids) 首行，顺序不确定，会导致归属随机。
+                picked = (by_num.get(str(rec.get("caller_mid") or ""))
+                          or by_num.get(str(rec.get("callee_mid") or ""))
+                          or (None, None))
+                cached = picked
+            except Exception as e:
+                print("[billing] phone resolve failed:", e)
+                cached = (None, None)
+            finally:
+                db.close()
+            _rate_cache_set(pk, cached)
+        phone_rate, phone_account = cached
+
+    # 3) 归属兜底：无接入点（话机注册呼叫 / 内线互拨 / 历史话单）→ 直接按话机归属账户解析
+    #    customer_id 与账户费率。
+    #    ⚠️ 旧实现在此处 `if not ap_id: return 全空`，导致话机通话话单既无账户也不计费。
+    if account_id is None and phone_account is not None:
+        account_id = phone_account
+        arow = _rate_cache_get("acct_%d" % account_id)
+        if arow is None:
+            db = SessionLocal()
+            try:
+                a = db.execute(
+                    select(Account.customer_id, Account.rate).where(Account.id == account_id)
+                ).first()
+                biz = db.scalar(select(Business.id).where(Business.account_id == account_id).limit(1))
+                arow = (a[0], a[1], biz) if a else (None, None, None)
+            except Exception as e:
+                print("[billing] account resolve failed:", e)
+                arow = (None, None, None)
+            finally:
+                db.close()
+            _rate_cache_set("acct_%d" % account_id, arow)
+        customer_id, account_rate, business_id = arow
+
+    # 归属不一致 → 忽略话机费率，回落接入点/账户（防异常配置串档）
+    if phone_account is not None and account_id is not None and phone_account != account_id:
+        phone_rate = None
+
+    # 费率链（收入侧）：话机 → 接入点 → 账户（每一级 NULL/<=0 均视为未配置，继续回落）
+    rate_used = _eff_rate(phone_rate)
+    if rate_used is None:
+        rate_used = _eff_rate(ap_rate)
+    if rate_used is None:
+        rate_used = _eff_rate(account_rate)
+    if rec.get("answer_time") and talk and talk > 0 and rate_used is not None:
+        bu = Decimal(str(rec.get("bill_unit") or 60))
+        if bu > 0:
+            units = int(Decimal(str(bill)) / bu)
+            cost = (rate_used * units).quantize(Decimal("0.0001"))
+
+    # ---- 成本侧（v0.3）：落地网关成本费率优先，回落运营商；独立成本计费单位 ----
+    cost_price = Decimal("0")
+    cost_rate_used = None
+    cost_bill_unit = None
+    gw_id = rec.get("gateway_id")
+    ca_id = rec.get("carrier_id")
+    try:
+        gw_id = int(gw_id) if gw_id and str(gw_id).isdigit() else None
+        ca_id = int(ca_id) if ca_id and str(ca_id).isdigit() else None
+    except (ValueError, TypeError):
+        gw_id = ca_id = None
+    gw_cost = cr_cost = None
+    if gw_id:
+        gk = "gw_%d" % gw_id
+        gw_cost = _rate_cache_get(gk)
+        if gw_cost is None:
+            db = SessionLocal()
+            try:
+                g = db.execute(
+                    select(Gateway.cost_rate, Gateway.bill_unit).where(Gateway.id == gw_id)
+                ).first()
+                gw_cost = (g[0], g[1]) if g else (None, None)
+            except Exception as e:
+                print("[billing] gw cost resolve failed:", e)
+                gw_cost = (None, None)
+            finally:
+                db.close()
+            _rate_cache_set(gk, gw_cost)
+    # 网关成本费率为 NULL 或 <=0（含遗留 0.0000，从未配置）一律视为「本层未配置」，
+    # 继续回落运营商（与收入侧 _eff_rate 对称，见 f7f26d2b 修正；CDR 311925b9 即此问题：
+    # 网关 gw-cost_rate=0.0000 → 本应回落运营商 0.0060，却记成 0）。
+    if gw_cost is not None and _eff_rate(gw_cost[0]) is None and ca_id:
+        ck = "cr_%d" % ca_id
+        cr_cost = _rate_cache_get(ck)
+        if cr_cost is None:
+            db = SessionLocal()
+            try:
+                c = db.execute(
+                    select(Carrier.cost_rate, Carrier.bill_unit).where(Carrier.id == ca_id)
+                ).first()
+                cr_cost = (c[0], c[1]) if c else (None, None)
+            except Exception as e:
+                print("[billing] carrier cost resolve failed:", e)
+                cr_cost = (None, None)
+            finally:
+                db.close()
+            _rate_cache_set(ck, cr_cost)
+    # 选取值：网关优先（成本费率 NULL/<=0 视为未配置，见 _eff_rate），否则回落运营商
+    sel = gw_cost if (gw_cost and _eff_rate(gw_cost[0]) is not None) else cr_cost
+    if sel and sel[0] is not None:
+        cost_rate_used = sel[0]
+        cost_bill_unit = sel[1] if sel[1] else 60
+    if rec.get("answer_time") and talk and talk > 0 and cost_rate_used is not None:
+        cbu = Decimal(str(cost_bill_unit or 60))
+        if cbu > 0:
+            # 与收入侧口径一致（§5.3）：成本计费单位数取 ceil(通话秒/成本计费单位)，不可用 int 截断（会少算一个单位、虚增毛利）
+            cunits = ceil(Decimal(str(talk)) / cbu)
+            cost_price = (cost_rate_used * cunits).quantize(Decimal("0.0001"))
+
+    return cost, rate_used, account_id, business_id, customer_id, cost_price, cost_rate_used, cost_bill_unit
+
+
+def _charge_account(cdr_uuid: str, cost) -> bool:
+    """v0.3 预付费：通话落库后扣减账户余额并写流水。
+
+    三道防重扣闸（与 T-208 幂等对齐）：
+      1. account_ledger.uk_ledger_cdr(cdr_uuid) 唯一键：重复插入直接 IntegrityError 跳过；
+      2. cdr.billed 标记：扣前检查，扣后置 1（且 UPDATE ... WHERE billed=0 保证只置一次）；
+      3. 事务内 `with_for_update` 行锁：防并发下余额竞态。
+    归属失败（account_id 为空）或已扣则直接返回，不报错。
+    """
+    cost = Decimal(str(cost))
+    if cost <= 0:
+        return False
+    db = SessionLocal()
+    try:
+        cdr_row = db.execute(
+            select(Cdr.id, Cdr.account_id, Cdr.billed).where(Cdr.uuid == cdr_uuid)
+        ).first()
+        if cdr_row is None:
+            return False
+        cdr_id, account_id, billed = cdr_row
+        if billed == 1:
+            return False  # 已扣，跳过
+        if account_id is None:
+            return False
+        # 行锁账户，避免并发余额竞态
+        acc = db.get(Account, account_id, with_for_update=True)
+        if acc is None:
+            return False
+        # 先插流水（唯一键 cdr_uuid 拦截重复扣费）——冲突即视为已扣，回滚返回
+        try:
+            lg = AccountLedger(
+                account_id=account_id, cdr_uuid=cdr_uuid, type=2,
+                amount=-cost, balance_after=(acc.balance or Decimal("0")) - cost,
+                remark="通话扣费", created_at=datetime.now(),
+            )
+            db.add(lg)
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            return False  # 重复扣费（重灌/重复事件），跳过
+        acc.balance = (acc.balance or Decimal("0")) - cost
+        db.execute(update(Cdr).where(Cdr.uuid == cdr_uuid, Cdr.billed == 0).values(billed=1))
+        db.commit()
+        return True
+    except Exception as e:
+        db.rollback()
+        print("[billing] charge account error: %s" % e)
+        return False
+    finally:
+        db.close()
+
+
+def _charge_carrier(cdr_uuid: str, cost_price) -> bool:
+    """v0.3.1 成本侧扣费：话单成本从运营商余额扣减并写流水。
+
+    与 _charge_account 对称，但**关键差异**：
+      - 不受 prepaid_enabled 门控——运营商成本始终归集（用户规则：只做扣费与计费，
+        无「余额不足不通」的拦截机制），故**始终扣减、余额可负**。
+      - 防重扣只靠 carrier_ledger.uk_carrier_ledger_cdr(cdr_uuid) 唯一键（与账户侧
+        uk_ledger_cdr 对称）；运营商不维护 cdr.billed 标记（该标记专供账户侧）。
+    归属失败（carrier_id 为空）或已扣（唯一键冲突）则跳过，不报错。
+    """
+    cost_price = Decimal(str(cost_price))
+    if cost_price <= 0:
+        return False
+    db = SessionLocal()
+    try:
+        cdr_row = db.execute(
+            select(Cdr.id, Cdr.carrier_id).where(Cdr.uuid == cdr_uuid)
+        ).first()
+        if cdr_row is None:
+            return False
+        cdr_id, carrier_id = cdr_row
+        if carrier_id is None:
+            return False
+        # 行锁运营商，避免并发余额竞态
+        car = db.get(Carrier, carrier_id, with_for_update=True)
+        if car is None:
+            return False
+        # 先插流水（唯一键 cdr_uuid 拦截重复扣费）——冲突即视为已扣，回滚返回
+        try:
+            lg = CarrierLedger(
+                carrier_id=carrier_id, cdr_uuid=cdr_uuid, type=2,
+                amount=-cost_price, balance_after=(car.balance or Decimal("0")) - cost_price,
+                remark="通话成本扣费", created_at=datetime.now(),
+            )
+            db.add(lg)
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            return False  # 重复扣费（重灌/重复事件），跳过
+        car.balance = (car.balance or Decimal("0")) - cost_price
+        db.commit()
+        return True
+    except Exception as e:
+        db.rollback()
+        print("[billing] charge carrier error: %s" % e)
+        return False
+    finally:
+        db.close()
+
+
+def _resolve_caller_account(caller_mid) -> int:
+    """v0.3 预付费：解析主叫所属 Account。返回 account_id 或 None（解析失败 → fail-open 放通）。
+
+    优先级：话机号 → 其 account_id；其次按接入点主叫也走不动（此处仅处理话机主叫）。
+    caller_mid 可能为 8 位租户号或旧 4 位号（迁移前）。号码全局唯一查询即安全。
+    """
+    if not caller_mid:
+        return None
+    db = SessionLocal()
+    try:
+        ph = db.execute(
+            select(SipPhone.account_id).where(SipPhone.phone_number == str(caller_mid))
+        ).first()
+        return ph[0] if ph and ph[0] is not None else None
+    except Exception as e:
+        print("[billing] resolve caller account failed:", e)
+        return None
+    finally:
+        db.close()
+
+
+def _check_balance_allowed(account_id: int) -> bool:
+    """v0.3 预付费：可用余额校验。余额充足返回 True，否则返回 False（拒呼）。
+
+    可用余额 = balance + credit_limit - min_balance。
+    预付费开关关闭时一律放通（见 config prepaid_enabled）。
+    """
+    from core.config import settings
+    if not settings.get("prepaid_enabled", False):
+        return True  # 开关未开 → 不拦截（默认关闭，验证通过后再开）
+    db = SessionLocal()
+    try:
+        acc = db.get(Account, account_id)
+        if acc is None:
+            return True  # 找不到账户 → fail-open，宁可漏拦不可误拒
+        bal = acc.balance or Decimal("0")
+        cl = acc.credit_limit or Decimal("0")
+        mb = acc.min_balance or Decimal("0")
+        return (bal + cl - mb) > 0
+    except Exception as e:
+        print("[billing] balance check failed (fail-open):", e)
+        return True  # 异常 → fail-open
+    finally:
+        db.close()
+
+
+def _replay_spool():
+    """T-208：重灌 cdr_spool 中落库失败的 CDR（DB 抖动恢复后补足，不双插）。"""
+    spool = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'cdr_spool')
+    if not os.path.isdir(spool):
+        return
+    for fp in glob.glob(os.path.join(spool, '*.json')):
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            vals = {c.name: None for c in Cdr.__table__.columns}
+            for k, v in data.items():
+                if k in vals:
+                    vals[k] = v
+            if _upsert_cdr_dict(vals):
+                os.remove(fp)
+                print('[CDR] reaper replayed', os.path.basename(fp))
+        except Exception as e:
+            print('[CDR] reaper replay failed', fp, e)
+
+
+def start_cdr_reaper(interval=30):
+    """T-208：周期重灌 cdr_spool（默认 30s）。主库抖动期间落盘失败的通话在恢复后自动补录。"""
+    def _loop():
+        while True:
+            time.sleep(interval)
+            try:
+                _replay_spool()
+            except Exception as e:
+                print('[CDR] reaper error', e)
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    print('[CDR] reaper started, interval=%ss' % interval)
+
+
+def _handle_sofia_reg(event) -> None:
+    """话机注册状态同步（sofia::register / sofia::expire）。"""
+    sub = event.getHeader("Event-Subclass") or ""
+    if sub not in ("sofia::register", "sofia::expire"):
+        return
+    user = (event.getHeader("from-user") or event.getHeader("username")
+            or event.getHeader("user") or "")
+    if not user:
+        return
+    st = 1 if sub == "sofia::register" else 0
+    db = SessionLocal()
+    try:
+        changed = False
+        row = db.scalar(select(SipPhone).where(SipPhone.phone_number == user))
+        if row is not None and row.status != st:
+            row.status = st
+            row.updated_at = datetime.utcnow()
+            changed = True
+        ap = db.scalar(select(AccessPoint).where(AccessPoint.reg_username == user))
+        if ap is not None and ap.reg_status != st:
+            ap.reg_status = st
+            ap.updated_at = datetime.utcnow()
+            changed = True
+        if changed:
+            db.commit()
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print("[phone-sync] event update failed:", e, flush=True)
+    finally:
+        db.close()

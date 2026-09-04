@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+pymysql
+pyyaml
+python-esl

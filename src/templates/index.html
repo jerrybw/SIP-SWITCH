@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<link rel="icon" href="data:,">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SIP 路由网关管理</title>
+  <link rel="stylesheet" href="/static/admin.css?v=20260903e">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">SIP 路由网关 · 管理控制台</span>
+    <span id="admin-user" class="muted"></span>
+    <button id="logout-btn" class="btn btn-sm" style="display:none" onclick="doLogout()">登出</button>
+    <a class="link" href="/api/stats/concurrency" target="_blank">并发快照</a>
+    <a class="link" href="/healthz" target="_blank">健康检查</a>
+  </header>
+  <div class="layout">
+    <nav id="sidebar" class="sidebar"></nav>
+    <main id="content" class="content">
+      <div class="placeholder">加载中…</div>
+    </main>
+  </div>
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head"><span id="modal-title"></span><button id="modal-close" class="btn-x">×</button></div>
+      <div id="modal-body" class="modal-body"></div>
+      <div class="modal-foot">
+        <button id="modal-cancel" class="btn">取消</button>
+        <button id="modal-save" class="btn btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/admin.js?v=20260904g"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# ===== Python =====
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ===== Runtime / data =====
+cdr_spool/
+*.db
+*.sqlite3
+*.log
+
+# ===== Deploy config with real credentials — 发布请复制为 config.example.yaml 并填占位符 =====
+config_settings.yaml
+config_settings.yaml.bak*
+config_settings.yaml.*
+
+# ===== Backup snapshots (manual cp backups, archived under dev_history/) =====
+*.bak*
+dev_history/
+
+# ===== Editor / OS =====
+.idea/
+.vscode/
+.DS_Store
