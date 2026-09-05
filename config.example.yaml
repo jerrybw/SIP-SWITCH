@@ -1,0 +1,39 @@
+# SIP Switch Gateway —— 配置模板（无真实值）
+#
+# 用法：
+#   1. 复制为 config_settings.yaml（与仓库根同级，已被 .gitignore 忽略，禁止提交）。
+#   2. 把下面所有 <...> 占位替换为真实值。
+#   3. 注意：config_settings.yaml 的值为「裸写、无引号」的 YAML 标量，
+#      —— 新凭据字符集必须限定为 [A-Za-z0-9_-] 且以字母开头，
+#         否则会破坏 YAML 解析（出现 - / * & ! { 等开头字符会报错）。
+#
+# 生成随机值示例：
+#   python -c "import secrets;print(secrets.token_hex(24))"   # jwt_secret / password_salt
+#   admin_password_hash = sha256(salt + 明文密码).hexdigest()
+#     （与 src/api/auth.py:_pw_hash 同源；salt 必须与上面 password_salt 一致）
+
+esl:
+  host: 127.0.0.1            # FreeSWITCH event_socket 监听地址
+  port: 8021                 # event_socket 端口
+  password: <esl-event-socket-password>   # 与 FS conf/autoload_configs/event_socket.conf.xml 的 password 一致
+  reconnect_interval: 5      # ESL 断线重连间隔（秒）
+  fs_node_uuid: <optional-fs-node-uuid>   # 多 FS 节点时可留空
+  recordings_dir: /var/lib/freeswitch/recordings   # 录音落盘目录（须 FS 可写）
+
+api:
+  host: 0.0.0.0
+  port: 8000                 # 网关 HTTP 监听端口（nginx 反代 443 -> 127.0.0.1:8000）
+
+mysql:
+  # mysql+pymysql://用户:密码@地址:3306/库名?charset=utf8mb4
+  url: mysql+pymysql://sip_switch:<mysql-password>@127.0.0.1:3306/sip_switch?charset=utf8mb4
+  pool_recycle: 3600         # 连接池回收间隔（秒），避免 MySQL 8h 闲连接被断
+
+prepaid_enabled: false       # true=预付费（余额不足 603 拒呼 + 挂断后扣费）；false=纯监控不计费
+
+auth:
+  admin_user: admin
+  password_salt: <random-salt>                 # secrets.token_hex(24)
+  admin_password_hash: <sha256-salt-password>  # sha256(password_salt + 明文密码).hexdigest()
+  jwt_secret: <random-secret>                  # secrets.token_hex(24)，变更会使所有已登录会话失效
+  token_expire_minutes: 120
