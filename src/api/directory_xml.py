@@ -7,19 +7,14 @@ from sqlalchemy import select
 from db.models import SipPhone, AccessPoint
 log = logging.getLogger("directory_xml")
 FS_DIR = "/usr/local/freeswitch/etc/freeswitch/directory"
-LT = chr(60)
-GT = chr(62)
-Q = chr(34)
-BS = chr(92)
 
 
 def _static_users():
     out = {}
     if not os.path.isdir(FS_DIR):
         return out
-    pu = LT + "user" + BS + "s+id=" + Q + "([^" + Q + "]+)" + Q
-    pp = (LT + "param" + BS + "s+name=" + Q + "password" + Q
-          + BS + "s+value=" + Q + "([^" + Q + "]*)" + Q)
+    pu = r'<user\s+id="([^"]+)"'
+    pp = r'<param\s+name="password"\s+value="([^"]*)"'
     for fp in glob.glob(os.path.join(FS_DIR, "**", "*.xml"), recursive=True):
         try:
             txt = open(fp, "r", encoding="utf-8", errors="ignore").read()
@@ -36,21 +31,22 @@ def _static_users():
 def _esc(s):
     s = str(s if s is not None else "")
     s = s.replace("&", "&amp;")
-    s = s.replace(LT, "&lt;")
-    s = s.replace(GT, "&gt;")
-    s = s.replace(Q, "&quot;")
+    s = s.replace("<", "&lt;")
+    s = s.replace(">", "&gt;")
+    s = s.replace('"', "&quot;")
     return s
 
 
 def _user_xml(user, password):
-    inner = (LT + "params" + GT
-             + LT + "param name=" + Q + "password" + Q
-             + " value=" + Q + _esc(password) + Q + chr(47) + GT
-             + LT + "param na" + "me=" + Q + "context" + Q
-             + " value=" + Q + "default" + Q + chr(47) + GT
-             + LT + chr(47) + "params" + GT)
-    return (LT + "user id=" + Q + _esc(user) + Q + GT + inner
-            + LT + chr(47) + "user" + GT)
+    inner = (
+        "<params>"
+        + '<param name="password" value="%s"/>' % _esc(password)
+        + '<param name="context" value="default"/>'
+        + "</params>"
+    )
+    return '<user id="%s">' % _esc(user) + inner + "</user>"
+
+
 def _doc(domain, users_xml):
     # 2026-09-03 修正：dial-string 只有第一组 {} 是「通道变量前缀」，其后必须是裸的
     # ${sofia_contact(...)} 展开结果作为真正的 origination URL。
@@ -61,16 +57,16 @@ def _doc(domain, users_xml):
     ds = ("{^^:sip_invite_domain=${dialed_domain}"
           ":presence_id=${dialed_user}@${dialed_domain}}"
           "${sofia_contact(*/${dialed_user}@${dialed_domain})}")
-    body = (LT + "document type=" + Q + "freeswitch/xml" + Q + GT
-            + LT + "section name=" + Q + "directory" + Q + GT
-            + LT + "domain name=" + Q + _esc(domain) + Q + GT
-            + LT + "params" + GT
-            + LT + "param name=" + Q + "dial-string" + Q
-            + " value=" + Q + ds + Q + chr(47) + GT
-            + LT + "/params" + GT
-            + LT + "users" + GT + users_xml + LT + "/users" + GT
-            + LT + "/domain" + GT + LT + "/section" + GT
-            + LT + "/document" + GT)
+    body = (
+        '<document type="freeswitch/xml">'
+        '<section name="directory">'
+        '<domain name="%s">' % _esc(domain)
+        + '<params>'
+        '<param name="dial-string" value="%s"/>' % ds
+        + "</params>"
+        + "<users>%s</users>" % users_xml
+        + "</domain></section></document>"
+    )
     return Response(content=body, media_type="text/xml")
 
 

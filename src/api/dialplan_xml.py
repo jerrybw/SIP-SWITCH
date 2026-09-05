@@ -1,36 +1,20 @@
 """mod_xml_curl 拨号计划 XML 生成（T-201 / T-202 / P1 / P2）。
 
-注意：FS 拨号计划 XML 含 <action / record_session / ${...} 字面量，运维通道 WAF 会
-拦截含这些字面量的命令，因此把这些字面量做拆分拼接（ACT / RS / DOL），使源文件中
-不出现连续的 <action / record_session / ${ 子串，便于安全部署。
-
-部署：本文件需经 transform_dialplan.py 注入 <context name="%s">" % context> 包裹后下发
-（FS mod_xml_curl 要求扩展位于 default 上下文，否则 NO_ROUTE_DESTINATION）。
-T-202 新增 build_outbound_xml，对应 section description="sip-gateway-outbound"，
-transform_dialplan.py 已同步支持该段的 <context> 包裹。
+FS mod_xml_curl 要求拨号计划扩展必须位于 <context name="default"> 内，且 <context> 必须
+嵌在 <document><section name="dialplan"> 之中（顺序写反会导致 NO_ROUTE_DESTINATION）。
+各 build_* 已按上述正确嵌套生成扩展；build_empty_xml 为「交回 FS 既有逻辑」语义，不包 <context>。
+T-202 新增 build_outbound_xml（section description="sip-gateway-outbound"，含 T-205 逐腿故障切换）。
 """
-# 拆分危险字面量，避免被外部通道的 DDL/字面量扫描拦截。
-ACT = "<" + "action"          # 等价于 "<action"
-RS = "record_" + "session"    # 等价于 "record_session"
-DOL = "$"                       # 等价于 "$"（与 "{" 拼接形成 ${...}）
-
-# mod_xml_curl 要求扩展必须位于 <context name="%s">" % context> 内，且 <context> 必须嵌在
-# <section name="dialplan"> 之中，即正确层级顺序为
-#   <document><section name="dialplan"><context name="%s">" % context><extension>...
-# 顺序写反（把 <context> 包在 <document> 外）会导致 FS 解析不到 extension，
-# 表现为 NO_ROUTE_DESTINATION / 静态 dialplan fallback -> 主叫收 404/480。
-# build_allow/deny/outbound 已在函数内按上述正确嵌套生成；build_empty 是
-# 「交回 FS 既有逻辑」语义，保持不包裹 <context>。
 
 
 def _act(app: str, data: str) -> str:
-    # 注意：必须输出合法的自闭合标签 "<action .../>"，否则 FS 无法解析动作。
-    return f'{ACT} application="{app}" data="{data}"/>'
+    # 必须输出合法的自闭合标签 "<action .../>"，否则 FS 无法解析动作。
+    return f'<action application="{app}" data="{data}"/>'
 
 
 def _var(name: str) -> str:
-    # 构造 ${name}，避免源文件出现连续 ${...} 字面量（运维通道 WAF 会拦截）。
-    return DOL + "{" + name + "}"
+    # 构造 ${name} 形式的 FS 通道变量引用。
+    return "${" + name + "}"
 
 
 # 与 FS 本地 Local_Extension 对齐：匹配 1000-1019，桥接到注册用户。
@@ -66,11 +50,11 @@ def build_allow_xml(callee: str, access_point_id=None, bill_unit=60, caller_type
     access_point_id / bill_unit 由路由层解析接入点后透传，供 CDR 关联（T-207）。
     account_id：话机注册呼叫（无接入点）时显式下发归属账户，使内线互拨也能落 account_id 并计费。
     """
-    rec = "rec_file=" + DOL + "{recordings_dir}/" + DOL + "{uuid}.wav"
-    rec_session_data = DOL + "{rec_file}"
-    ringback = DOL + "{us-ring}"
-    transfer_ringback = DOL + "{hold_music}"
-    bridge_data = "user/$1@" + DOL + "{domain_name}"
+    rec = "rec_file=${recordings_dir}/${uuid}.wav"
+    rec_session_data = "${rec_file}"
+    ringback = "${us-ring}"
+    transfer_ringback = "${hold_music}"
+    bridge_data = "user/$1@${domain_name}"
     lines = [
         "<document type=\"freeswitch/xml\">",
         "  <section name=\"dialplan\" description=\"sip-gateway\">",
@@ -82,7 +66,7 @@ def build_allow_xml(callee: str, access_point_id=None, bill_unit=60, caller_type
         "          " + _act('set', 'transfer_ringback=' + transfer_ringback),
         "          " + _act('set', 'call_timeout=30'),
         "          " + _act('set', rec),
-        "          " + _act(RS, rec_session_data),
+        "          " + _act('record_session', rec_session_data),
     ]
     if access_point_id is not None:
         lines.append("          " + _act('set', 'cdr_access_point_id=%s' % access_point_id))
@@ -218,10 +202,10 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
 
     rec = []
     if record_enabled:
-        r = "rec_file=" + DOL + "{recordings_dir}/" + DOL + "{uuid}.wav"
-        rec_session_data = DOL + "{rec_file}"
+        r = "rec_file=${recordings_dir}/${uuid}.wav"
+        rec_session_data = "${rec_file}"
         rec.append("          " + _act('set', r))
-        rec.append("          " + _act(RS, rec_session_data))
+        rec.append("          " + _act('record_session', rec_session_data))
 
     doc_open = [
         "<document type=\"freeswitch/xml\">",

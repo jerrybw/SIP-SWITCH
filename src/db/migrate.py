@@ -1,8 +1,8 @@
-"""轻量自迁移（M2）：在网关进程内对 rule 表补齐列。
+"""轻量自迁移：在网关进程内按需补齐表/列/约束。
 
-背景：运维通道（lighthouse WAF）禁止直接执行 DDL（ALTER/DROP 等），
-因此把"加列"放到网关自身启动时执行——运行在服务器端，不经理算 WAF。
-只针对 MySQL；本地 sqlite 测试跳过。幂等：先查 information_schema 再决定。
+把 DDL 放到网关自身启动时执行（而非依赖外部 DDL 执行通道），只针对 MySQL，
+本地 sqlite 测试跳过。全部幂等：先查 information_schema 判断是否存在，缺才补，
+失败仅告警不中断（网关启动不能被 DDL 卡死）。
 """
 from sqlalchemy import text
 
@@ -20,7 +20,7 @@ def ensure_rule_act_column(engine) -> None:
         if exists:
             return
         # 注意：SQL 字面量做拆分以避免被外部通道的 DDL 扫描拦截。
-        ddl = "AL" + "TER TABLE rule ADD COLUMN act SMALLINT NOT NULL DEFAULT 1"
+        ddl = "ALTER TABLE rule ADD COLUMN act SMALLINT NOT NULL DEFAULT 1"
         conn.execute(text(ddl))
         conn.commit()
 
@@ -37,7 +37,7 @@ def ensure_rule_replace_to_column(engine) -> None:
         exists = conn.execute(text(check_sql)).scalar() is not None
         if exists:
             return
-        ddl = "AL" + "TER TABLE rule ADD COLUMN replace_to VARCHAR(255)"
+        ddl = "ALTER TABLE rule ADD COLUMN replace_to VARCHAR(255)"
         conn.execute(text(ddl))
         conn.commit()
 def ensure_sip_phone_table(engine) -> None:
@@ -50,7 +50,7 @@ def ensure_sip_phone_table(engine) -> None:
         )).scalar() is not None
         if exists:
             return
-        _ct = "CRE" + "ATE " + "TAB" + "LE sip_phone ("
+        _ct = "CREATE TABLE sip_phone ("
         ddl = (
             _ct +
             "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, "
@@ -72,11 +72,10 @@ def ensure_sip_phone_table(engine) -> None:
 def _fs_vars(cache={}):
     if cache:
         return cache
-    _q = chr(34)
     vp = "/usr/local/freeswitch/etc/freeswitch/vars.xml"
     try:
         import re
-        pat = "data=" + _q + "([A-Za-z0-9_]+)=([^" + _q + "]*)" + _q
+        pat = r'data="([A-Za-z0-9_]+)=([^"]*)"'
         txt = open(vp, "r", encoding="utf-8", errors="ignore").read()
         for mm in re.finditer(pat, txt):
             cache[mm.group(1)] = mm.group(2)
@@ -111,12 +110,8 @@ def seed_static_phones(engine) -> None:
     droot = "/usr/local/freeswitch/etc/freeswitch/directory"
     if not os.path.isdir(droot):
         return
-    _q = chr(34)
-    _bs = chr(92)
-    _pu = (chr(60) + "user" + _bs + "s+id=" + _q + "([^" + _q + "]+)" + _q
-           + "([^" + chr(62) + "]*)")
-    _pp = (chr(60) + "param" + _bs + "s+name=" + _q + "password" + _q
-           + _bs + "s+value=" + _q + "([^" + _q + "]*)" + _q)
+    _pu = r'<user\s+id="([^"]+)"([^>]*)'
+    _pp = r'<param\s+name="password"\s+value="([^"]*)"'
     files = sorted(glob.glob(os.path.join(droot, "*", "*.xml")))
     for fp in files:
         bn = os.path.basename(fp)
@@ -141,11 +136,11 @@ def seed_static_phones(engine) -> None:
             continue
         try:
             with engine.connect() as conn:
-                _sel = "SEL" + "ECT 1 FROM sip_phone WHERE phone_number = :p"
+                _sel = "SELECT 1 FROM sip_phone WHERE phone_number = :p"
                 ex = conn.execute(text(_sel), {"p": uid}).scalar() is not None
                 if ex:
                     continue
-                _ins = ("INS" + "ERT IN" + "TO sip_phone (phone_number, password, "
+                _ins = ("INSERT INTO sip_phone (phone_number, password, "
                         "status, sync_interval, description, created_at, updated_at)"
                         " VAL" + "UES (:p, :pw, 0, 30, 'fs static', NOW(), NOW())")
                 conn.execute(text(_ins), {"p": uid, "pw": pw})
@@ -157,12 +152,12 @@ def ensure_system_setting_table(engine) -> None:
         return
     with engine.connect() as conn:
         exists = conn.execute(text(
-            "SEL" + "ECT 1 FROM information_schema.tables "
+            "SELECT 1 FROM information_schema.tables "
             "WHERE table_schema = DATABASE() AND table_name = 'system_setting'"
         )).scalar() is not None
         if exists:
             return
-        _ct = "CRE" + "ATE " + "TAB" + "LE system_setting ("
+        _ct = "CREATE TABLE system_setting ("
         ddl = (_ct +
                "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, "
                "`key` VARCHAR(64) NOT NULL, "
@@ -182,26 +177,26 @@ def ensure_system_setting_defaults(engine) -> None:
     )
     with engine.connect() as conn:
         for k, v, d in defaults:
-            _sel = "SEL" + "ECT 1 FROM system_setting WHERE `key` = :k"
+            _sel = "SELECT 1 FROM system_setting WHERE `key` = :k"
             ex = conn.execute(text(_sel), {"k": k}).scalar() is not None
             if ex:
                 continue
-            _ins = ("INS" + "ERT IN" + "TO system_setting (`key`, `value`, description, updated_at) "
-                    "VAL" + "UES (:k, :v, :d, NOW())")
+            _ins = ("INSERT INTO system_setting (`key`, `value`, description, updated_at) "
+                    "VALUES (:k, :v, :d, NOW())")
             conn.execute(text(_ins), {"k": k, "v": v, "d": d})
         conn.commit()
 def ensure_ap_reg_status_column(engine) -> None:
     if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
         return
     check_sql = (
-        "SEL" + "ECT 1 FROM information_schema.columns "
+        "SELECT 1 FROM information_schema.columns "
         "WHERE table_schema = DATABASE() AND table_name = 'access_point' AND column_name = 'reg_status'"
     )
     with engine.connect() as conn:
         exists = conn.execute(text(check_sql)).scalar() is not None
         if exists:
             return
-        ddl = "AL" + "TER TABLE access_point ADD COLUMN reg_status SMALLINT NOT NULL DEFAULT 0"
+        ddl = "ALTER TABLE access_point ADD COLUMN reg_status SMALLINT NOT NULL DEFAULT 0"
         conn.execute(text(ddl))
         conn.commit()
 
@@ -210,14 +205,14 @@ def ensure_cdr_caller_type_column(engine) -> None:
     if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
         return
     check_sql = (
-        "SEL" + "ECT 1 FROM information_schema.columns "
+        "SELECT 1 FROM information_schema.columns "
         "WHERE table_schema = DATABASE() AND table_name = 'cdr' AND column_name = 'caller_type'"
     )
     with engine.connect() as conn:
         exists = conn.execute(text(check_sql)).scalar() is not None
         if exists:
             return
-        ddl = "AL" + "TER TABLE cdr ADD COLUMN caller_type VARCHAR(16) NOT NULL DEFAULT ''"
+        ddl = "ALTER TABLE cdr ADD COLUMN caller_type VARCHAR(16) NOT NULL DEFAULT ''"
         conn.execute(text(ddl))
         conn.commit()
 
@@ -241,7 +236,7 @@ def ensure_gateway_failover_pre_ring_only_column(engine) -> None:
     if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
         return
     check_sql = (
-        "SEL" + "ECT 1 FROM information_schema.columns "
+        "SELECT 1 FROM information_schema.columns "
         "WHERE table_schema = DATABASE() AND table_name = 'gateway' "
         "AND column_name = 'failover_pre_ring_only'"
     )
@@ -249,7 +244,7 @@ def ensure_gateway_failover_pre_ring_only_column(engine) -> None:
         exists = conn.execute(text(check_sql)).scalar() is not None
         if exists:
             return
-        ddl = "AL" + "TER TABLE gateway ADD COLUMN failover_pre_ring_only SMALLINT NOT NULL DEFAULT 0"
+        ddl = "ALTER TABLE gateway ADD COLUMN failover_pre_ring_only SMALLINT NOT NULL DEFAULT 0"
         conn.execute(text(ddl))
         conn.commit()
 
@@ -259,14 +254,14 @@ def ensure_sip_phone_enabled_column(engine) -> None:
     if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
         return
     check_sql = (
-        "SEL" + "ECT 1 FROM information_schema.columns "
+        "SELECT 1 FROM information_schema.columns "
         "WHERE table_schema = DATABASE() AND table_name = 'sip_phone' AND column_name = 'enabled'"
     )
     with engine.connect() as conn:
         exists = conn.execute(text(check_sql)).scalar() is not None
         if exists:
             return
-        ddl = "AL" + "TER TABLE sip_phone ADD COLUMN enabled SMALLINT NOT NULL DEFAULT 1"
+        ddl = "ALTER TABLE sip_phone ADD COLUMN enabled SMALLINT NOT NULL DEFAULT 1"
         conn.execute(text(ddl))
         conn.commit()
 
@@ -276,14 +271,14 @@ def ensure_cdr_hangup_direction_column(engine) -> None:
     if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
         return
     check_sql = (
-        "SEL" + "ECT 1 FROM information_schema.columns "
+        "SELECT 1 FROM information_schema.columns "
         "WHERE table_schema = DATABASE() AND table_name = 'cdr' AND column_name = 'hangup_direction'"
     )
     with engine.connect() as conn:
         exists = conn.execute(text(check_sql)).scalar() is not None
         if exists:
             return
-        ddl = "AL" + "TER TABLE cdr ADD COLUMN hangup_direction SMALLINT NOT NULL DEFAULT 0"
+        ddl = "ALTER TABLE cdr ADD COLUMN hangup_direction SMALLINT NOT NULL DEFAULT 0"
         conn.execute(text(ddl))
         conn.commit()
 
@@ -293,7 +288,7 @@ def ensure_gateway_heartbeat_fail_count_column(engine) -> None:
     if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
         return
     check_sql = (
-        "SEL" + "ECT 1 FROM information_schema.columns "
+        "SELECT 1 FROM information_schema.columns "
         "WHERE table_schema = DATABASE() AND table_name = 'gateway' "
         "AND column_name = 'heartbeat_fail_count'"
     )
@@ -301,7 +296,7 @@ def ensure_gateway_heartbeat_fail_count_column(engine) -> None:
         exists = conn.execute(text(check_sql)).scalar() is not None
         if exists:
             return
-        ddl = "AL" + "TER TABLE gateway ADD COLUMN heartbeat_fail_count INT NOT NULL DEFAULT 0"
+        ddl = "ALTER TABLE gateway ADD COLUMN heartbeat_fail_count INT NOT NULL DEFAULT 0"
         conn.execute(text(ddl))
         conn.commit()
 
@@ -319,11 +314,11 @@ def ensure_billing_columns(engine) -> None:
     ]
     with engine.connect() as conn:
         for tbl, col, typ in adds:
-            chk = ("SEL" + "ECT 1 FROM information_schema.columns "
+            chk = ("SELECT 1 FROM information_schema.columns "
                    "WHERE table_schema = DATABASE() AND table_name = '%s' AND column_name = '%s'" % (tbl, col))
             if conn.execute(text(chk)).scalar() is not None:
                 continue
-            conn.execute(text("AL" + "TER TABLE %s ADD COLUMN %s %s" % (tbl, col, typ)))
+            conn.execute(text("ALTER TABLE %s ADD COLUMN %s %s" % (tbl, col, typ)))
             conn.commit()
 
 
@@ -339,7 +334,7 @@ def ensure_cdr_uuid_unique(engine) -> None:
         return
     with engine.connect() as conn:
         has_idx = conn.execute(text(
-            "SEL" + "ECT 1 FROM information_schema.statistics "
+            "SELECT 1 FROM information_schema.statistics "
             "WHERE table_schema = DATABASE() AND table_name = 'cdr' "
             "AND index_name IN ('uk_cdr_uuid', 'uq_cdr_uuid')"
         )).scalar() is not None
@@ -352,7 +347,7 @@ def ensure_cdr_uuid_unique(engine) -> None:
         ))
         conn.commit()
         print("[migrate] deduplicated duplicate cdr.uuid rows")
-        ddl = "AL" + "TER TABLE cdr ADD UNIQUE KEY uq_cdr_uuid (uuid, start_time)"
+        ddl = "ALTER TABLE cdr ADD UNIQUE KEY uq_cdr_uuid (uuid, start_time)"
         conn.execute(text(ddl))
         conn.commit()
 
@@ -362,7 +357,7 @@ def ensure_cdr_uuid_unique(engine) -> None:
 # ---------------------------------------------------------------------------
 
 def _col_exists(conn, tbl, col) -> bool:
-    chk = ("SEL" + "ECT 1 FROM information_schema.columns "
+    chk = ("SELECT 1 FROM information_schema.columns "
            "WHERE table_schema = DATABASE() AND table_name = '%s' AND column_name = '%s'" % (tbl, col))
     return conn.execute(text(chk)).scalar() is not None
 
@@ -372,7 +367,7 @@ def _add_cols(conn, adds) -> None:
     for tbl, col, typ in adds:
         if _col_exists(conn, tbl, col):
             continue
-        conn.execute(text("AL" + "TER TABLE %s ADD COLUMN %s %s" % (tbl, col, typ)))
+        conn.execute(text("ALTER TABLE %s ADD COLUMN %s %s" % (tbl, col, typ)))
         conn.commit()
         print("[migrate] added column %s.%s" % (tbl, col))
 
@@ -397,49 +392,49 @@ def ensure_multitenant_columns(engine) -> None:
         ])
         # 回填租户号：按 id 升序，8000 起
         rows = conn.execute(text(
-            "SEL" + "ECT id FROM account WHERE account_number IS NULL OR account_number = '' ORDER BY id"
+            "SELECT id FROM account WHERE account_number IS NULL OR account_number = '' ORDER BY id"
         )).fetchall()
         if rows:
             # 取当前已用最大号，避免与既有号冲突（新号 = max(8000起基线, 现有最大+1)）
             used = conn.execute(text(
-                "SEL" + "ECT CAST(account_number AS UNSIGNED) FROM account "
+                "SELECT CAST(account_number AS UNSIGNED) FROM account "
                 "WHERE account_number IS NOT NULL AND account_number REGEXP '^[0-9]+$'"
             )).fetchall()
             nxt = max([int(u[0]) for u in used] + [7999]) + 1
             for (aid,) in rows:
                 conn.execute(text(
-                    "UPD" + "ATE account SET account_number = :n WHERE id = :i"
+                    "UPDATE account SET account_number = :n WHERE id = :i"
                 ), {"n": str(nxt), "i": aid})
                 nxt += 1
             conn.commit()
             print("[migrate] backfilled account_number for %d account(s)" % len(rows))
         # 唯一索引（回填后再建）
         has_uq = conn.execute(text(
-            "SEL" + "ECT 1 FROM information_schema.statistics "
+            "SELECT 1 FROM information_schema.statistics "
             "WHERE table_schema = DATABASE() AND table_name = 'account' "
             "AND index_name = 'uq_account_number'"
         )).scalar() is not None
         if not has_uq:
             dup = conn.execute(text(
-                "SEL" + "ECT 1 FROM (SELECT account_number FROM account "
+                "SELECT 1 FROM (SELECT account_number FROM account "
                 "GROUP BY account_number HAVING COUNT(*) > 1 LIMIT 1) t"
             )).scalar() is not None
             if dup:
                 print("[migrate] WARN duplicate account_number exists, skip unique index")
             else:
-                conn.execute(text("AL" + "TER TABLE account ADD UNIQUE KEY uq_account_number (account_number)"))
+                conn.execute(text("ALTER TABLE account ADD UNIQUE KEY uq_account_number (account_number)"))
                 conn.commit()
         # sip_phone.account_id 索引 + 存量回填
         has_idx = conn.execute(text(
-            "SEL" + "ECT 1 FROM information_schema.statistics "
+            "SELECT 1 FROM information_schema.statistics "
             "WHERE table_schema = DATABASE() AND table_name = 'sip_phone' "
             "AND index_name = 'idx_sip_phone_account'"
         )).scalar() is not None
         if not has_idx:
-            conn.execute(text("AL" + "TER TABLE sip_phone ADD INDEX idx_sip_phone_account (account_id)"))
+            conn.execute(text("ALTER TABLE sip_phone ADD INDEX idx_sip_phone_account (account_id)"))
             conn.commit()
         conn.execute(text(
-            "UPD" + "ATE sip_phone SET account_id = "
+            "UPDATE sip_phone SET account_id = "
             "(SELECT MIN(id) FROM account) WHERE account_id IS NULL"
         ))
         conn.commit()
@@ -478,23 +473,23 @@ def ensure_access_point_account_column(engine) -> None:
         _add_cols(conn, [("access_point", "account_id", "BIGINT")])
         # 回填存量：接入点租户 = 其原商户的租户
         conn.execute(text(
-            "UPD" + "ATE access_point ap "
+            "UPDATE access_point ap "
             "JOIN business b ON b.id = ap.business_id "
             "SET ap.account_id = b.account_id "
             "WHERE ap.account_id IS NULL"
         ))
         conn.commit()
         # business_id 改可空（MySQL 8 对 FK 列改 nullability 会保留 fk_ap_business，已验证）
-        conn.execute(text("AL" + "TER TABLE access_point MODIFY business_id bigint unsigned NULL"))
+        conn.execute(text("ALTER TABLE access_point MODIFY business_id bigint unsigned NULL"))
         conn.commit()
         # account_id 索引
         has_idx = conn.execute(text(
-            "SEL" + "ECT 1 FROM information_schema.statistics "
+            "SELECT 1 FROM information_schema.statistics "
             "WHERE table_schema = DATABASE() AND table_name = 'access_point' "
             "AND index_name = 'idx_ap_account'"
         )).scalar() is not None
         if not has_idx:
-            conn.execute(text("AL" + "TER TABLE access_point ADD INDEX idx_ap_account (account_id)"))
+            conn.execute(text("ALTER TABLE access_point ADD INDEX idx_ap_account (account_id)"))
             conn.commit()
         print("[migrate] access_point.account_id backfilled, business_id made nullable")
 
@@ -509,12 +504,12 @@ def ensure_account_ledger_table(engine) -> None:
         return
     with engine.connect() as conn:
         exists = conn.execute(text(
-            "SEL" + "ECT 1 FROM information_schema.tables "
+            "SELECT 1 FROM information_schema.tables "
             "WHERE table_schema = DATABASE() AND table_name = 'account_ledger'"
         )).scalar() is not None
         if exists:
             return
-        _ct = "CRE" + "ATE " + "TAB" + "LE account_ledger ("
+        _ct = "CREATE TABLE account_ledger ("
         ddl = (
             _ct +
             "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, "
@@ -555,12 +550,12 @@ def ensure_carrier_ledger_table(engine) -> None:
         return
     with engine.connect() as conn:
         exists = conn.execute(text(
-            "SEL" + "ECT 1 FROM information_schema.tables "
+            "SELECT 1 FROM information_schema.tables "
             "WHERE table_schema = DATABASE() AND table_name = 'carrier_ledger'"
         )).scalar() is not None
         if exists:
             return
-        _ct = "CRE" + "ATE " + "TAB" + "LE carrier_ledger ("
+        _ct = "CREATE TABLE carrier_ledger ("
         ddl = (
             _ct +
             "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, "
@@ -592,7 +587,7 @@ def migrate_phone_numbers(engine, dry_run: bool = False) -> dict:
         return result
     with engine.connect() as conn:
         rows = conn.execute(text(
-            "SEL" + "ECT p.id, p.phone_number, a.account_number "
+            "SELECT p.id, p.phone_number, a.account_number "
             "FROM sip_phone p JOIN account a ON a.id = p.account_id "
             "ORDER BY p.id"
         )).fetchall()
@@ -613,7 +608,7 @@ def migrate_phone_numbers(engine, dry_run: bool = False) -> dict:
                 continue
             # 目标号已被占用则跳过（避免撞唯一键）
             occupied = conn.execute(text(
-                "SEL" + "ECT 1 FROM sip_phone WHERE phone_number = :n AND id <> :i"
+                "SELECT 1 FROM sip_phone WHERE phone_number = :n AND id <> :i"
             ), {"n": new_num, "i": pid}).scalar() is not None
             if occupied:
                 result["skipped"].append((pid, num, "目标号 %s 已存在" % new_num))
@@ -622,7 +617,7 @@ def migrate_phone_numbers(engine, dry_run: bool = False) -> dict:
                 print("[migrate][dry-run] %s -> %s" % (num, new_num))
             else:
                 conn.execute(text(
-                    "UPD" + "ATE sip_phone SET phone_number = :n WHERE id = :i"
+                    "UPDATE sip_phone SET phone_number = :n WHERE id = :i"
                 ), {"n": new_num, "i": pid})
             result["migrated"] += 1
         if not dry_run:
@@ -632,7 +627,7 @@ def migrate_phone_numbers(engine, dry_run: bool = False) -> dict:
 
 def _constraint_exists(conn, name) -> bool:
     """information_schema 幂等：约束（含 CHECK）是否已存在。"""
-    chk = ("SEL" + "ECT 1 FROM information_schema.TABLE_CONSTRAINTS "
+    chk = ("SELECT 1 FROM information_schema.TABLE_CONSTRAINTS "
            "WHERE constraint_schema = DATABASE() AND constraint_name = '%s'" % name)
     return conn.execute(text(chk)).scalar() is not None
 
@@ -643,7 +638,7 @@ def _add_check(conn, table, name, clause) -> None:
         return
     try:
         conn.execute(text(
-            "AL" + "TER TABLE %s ADD CONSTRAINT %s CHECK (%s)" % (table, name, clause)
+            "ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s)" % (table, name, clause)
         ))
         conn.commit()
         print("[migrate] added CHECK %s ON %s" % (name, table))
@@ -673,13 +668,13 @@ def ensure_validation_constraints(engine) -> None:
         _add_check(conn, "account", "chk_acct_no_range",
                    "cast(account_number as unsigned) >= 8000")
         nullable = conn.execute(text(
-            "SEL" + "ECT 1 FROM information_schema.columns "
+            "SELECT 1 FROM information_schema.columns "
             "WHERE table_schema = DATABASE() AND table_name = 'account' "
             "AND column_name = 'account_number' AND is_nullable = 'YES'"
         )).scalar() is not None
         if nullable:
             conn.execute(text(
-                "AL" + "TER TABLE account MODIFY account_number VARCHAR(4) NOT NULL"
+                "ALTER TABLE account MODIFY account_number VARCHAR(4) NOT NULL"
             ))
             conn.commit()
             print("[migrate] account.account_number -> NOT NULL")
@@ -715,14 +710,14 @@ def ensure_endpoint_host_columns(engine) -> None:
         return
     with engine.connect() as conn:
         cur_len = conn.execute(text(
-            "SEL" + "ECT character_maximum_length FROM information_schema.columns "
+            "SELECT character_maximum_length FROM information_schema.columns "
             "WHERE table_schema = DATABASE() AND table_name = 'access_point' "
             "AND column_name = 'register_host'"
         )).scalar()
         if cur_len is None or int(cur_len) >= 512:
             return
         conn.execute(text(
-            "AL" + "TER TABLE access_point MODIFY register_host VARCHAR(512) NULL"
+            "ALTER TABLE access_point MODIFY register_host VARCHAR(512) NULL"
         ))
         conn.commit()
         print("[migrate] access_point.register_host %s -> 512" % cur_len)

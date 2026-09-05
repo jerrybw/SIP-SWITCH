@@ -4,7 +4,8 @@ log = logging.getLogger("fs_provision")
 FSD = "/usr/local/freeswitch/etc/freeswitch/sip_profiles/external"
 FSC = "/usr/local/freeswitch/bin/fs_cli"
 PROF = "external"
-LT = chr(60); GT = chr(62); Q = chr(34)
+
+
 def bgw(gw):
     p = "{}:{}".format(gw.ip, gw.port or 5060)
     # 2026-09-03：管理停用(status=0)的网关下发 register=false —— 停用即停止向对端注册
@@ -13,18 +14,22 @@ def bgw(gw):
     reg = "false" if st != 1 else ("true" if int(getattr(gw, "auth_type", 0) or 0) == 1 else "false")
     u = getattr(gw, "username", None) or gw.name
     w = getattr(gw, "password", None) or ""
-    L = [LT+"include"+GT,
-         "  "+LT+"gateway name="+Q+gw.name+Q+GT,
-         "    "+LT+"param name="+Q+"proxy"+Q+" value="+Q+p+Q+"/"+GT,
-         "    "+LT+"param name="+Q+"realm"+Q+" value="+Q+p+Q+"/"+GT,
-         "    "+LT+"param name="+Q+"register"+Q+" value="+Q+reg+Q+"/"+GT,
-         "    "+LT+"param name="+Q+"username"+Q+" value="+Q+u+Q+"/"+GT,
-         "    "+LT+"param name="+Q+"password"+Q+" value="+Q+w+Q+"/"+GT,
-         "    "+LT+"param name="+Q+"caller-id-in-from"+Q+" value="+Q+"true"+Q+"/"+GT,
-         "  "+LT+"/gateway"+GT, LT+"/include"+GT]
-    return chr(10).join(L)+chr(10)
+    return (
+        "<include>\n"
+        + '  <gateway name="%s">\n' % gw.name
+        + '    <param name="proxy" value="%s"/>\n' % p
+        + '    <param name="realm" value="%s"/>\n' % p
+        + '    <param name="register" value="%s"/>\n' % reg
+        + '    <param name="username" value="%s"/>\n' % u
+        + '    <param name="password" value="%s"/>\n' % w
+        + '    <param name="caller-id-in-from" value="true"/>\n'
+        + "  </gateway>\n"
+        + "</include>\n"
+    )
+
+
 def gpath(n):
-    return os.path.join(FSD, n+".xml")
+    return os.path.join(FSD, n + ".xml")
 
 
 def wxml(gw):
