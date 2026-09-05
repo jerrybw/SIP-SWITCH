@@ -1,0 +1,16 @@
+[Unit]
+Description=SIP Switch Gateway (Python 业务网关)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sip-switch-gateway
+ExecStart=/opt/sip-switch-gateway/venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=5
+User=root
+StandardOutput=append:/var/log/sip-gateway.log
+StandardError=append:/var/log/sip-gateway.log
+
+[Install]
+WantedBy=multi-user.target

@@ -87,7 +87,7 @@ sip-switch-gateway/
 ```bash
 cd sip-switch-gateway
 python3 -m venv venv && . venv/bin/activate
-pip install -r requirements.txt        # 含 python-esl（见文件内注释）
+pip install -r requirements.txt        # python-esl 不在 PyPI，需另行从 FreeSWITCH 源码安装（见下方说明）
 ```
 
 ### 2. 配置
@@ -202,6 +202,7 @@ pytest
 - `tests/test_migrate_idempotent.py` — 约束迁移幂等（需 MySQL，无环境时跳过）。
 
 > 纯函数测试可本地直接跑；涉及 MySQL/ESL 的测试会在无相应环境时自动 `skip`。
+> 本仓库已配置 GitHub Actions（`.github/workflows/tests.yml`），每次 push/PR 自动跑 `pytest` 冒烟。
 
 ---
 

@@ -13,4 +13,5 @@ python-multipart==0.0.32          # FastAPI 解析 form（/fs/directory POST、�
 # FreeSWITCH ESL 客户端依赖（代码中 `from ESL import ESLconnection`）。
 # 注意：部署 venv 中该包以「未纳入 pip 元数据」的方式存在（pip show/python -l 均查不到版本），
 # 因此此处不钉版本。首次部署请执行 `pip install python-esl` 后补钉具体版本。
-python-esl
+# python-esl  —— 不在 PyPI。请从 FreeSWITCH 源码安装其 Python 绑定（位于 libs/esl/，make 后 `pip install ./libs/esl`），
+# 或在已装 FS 的机器上 `pip install python-esl`（FS 提供的包）。详见 README §4.2。
