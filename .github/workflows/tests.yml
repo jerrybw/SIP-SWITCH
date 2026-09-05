@@ -1,22 +1,90 @@
-name: tests
+name: smoke
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass
+          MYSQL_DATABASE: sip_switch
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptestpass"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      # 指向本次运行的 MySQL 服务，使迁移约束测试真正跑起来；无库/未建表则测试自动 skip
+      GATEWAY_CONFIG: /tmp/ci_config.yaml
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
-      - name: Run smoke tests
+
+      - name: Wait for MySQL and load schema
+        run: |
+          python - <<'PY'
+          import time, pymysql, pathlib
+          sql = pathlib.Path("deploy/mysql/init/01-schema.sql").read_text(encoding="utf-8")
+          conn = None
+          for _ in range(30):
+              try:
+                  conn = pymysql.connect(host="127.0.0.1", port=3306,
+                                        user="root", password="testpass",
+                                        database="sip_switch", connect_timeout=5)
+                  break
+              except Exception:
+                  time.sleep(2)
+          if conn is None:
+              raise SystemExit("MySQL not ready")
+          cur = conn.cursor()
+          for stmt in sql.split(";\n"):
+              s = stmt.strip()
+              if s:
+                  cur.execute(s)
+          conn.commit()
+          cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='sip_switch'")
+          print("tables loaded:", cur.fetchone()[0])
+          conn.close()
+          PY
+
+      - name: Write CI config
+        run: |
+          cat > /tmp/ci_config.yaml <<'YAML'
+          esl:
+            host: 127.0.0.1
+            port: 8021
+            password: dummy
+          api:
+            host: 0.0.0.0
+            port: 8000
+          mysql:
+            url: mysql+pymysql://root:testpass@127.0.0.1:3306/sip_switch
+            pool_recycle: 3600
+          prepaid_enabled: false
+          auth:
+            admin_user: admin
+            password_salt: testsalt
+            admin_password_hash: dummy
+            jwt_secret: testsecret
+            token_expire_minutes: 120
+          YAML
+
+      - name: Run pytest
         run: pytest -q

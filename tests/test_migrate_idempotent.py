@@ -6,7 +6,7 @@
 数值下限/费率取值。
 
 注意：import db.migrate 经由 db.session 触发启动期迁移，需要可达的 MySQL 与有效
-config_settings.yaml；本地无 DB 时整文件 skip。
+config_settings.yaml；本地无 DB、或 DB 未加载 schema 时整文件 skip（CI 无库不报红）。
 """
 import pytest
 from sqlalchemy import create_engine, text
@@ -21,9 +21,35 @@ except Exception:  # noqa: BLE001
     ensure_validation_constraints = None
     _url = None
 
+
+def _db_ready():
+    """可配置且已加载 schema 的 MySQL 才跑本测试；否则 skip（CI 无库时不报红）。"""
+    if not _url:
+        return False
+    try:
+        from sqlalchemy.engine.url import make_url
+        import pymysql
+        u = make_url(_url)
+        conn = pymysql.connect(
+            host=u.host, port=u.port or 3306,
+            user=u.username or "root", password=u.password or "",
+            database=u.database, connect_timeout=5,
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = 'account'"
+            )
+            ok = cur.fetchone() is not None
+        conn.close()
+        return ok
+    except Exception:  # noqa: BLE001
+        return False
+
+
 pytestmark = pytest.mark.skipif(
-    not _have,
-    reason="需配置 mysql.url 的真实库（config_settings.yaml）",
+    not _db_ready(),
+    reason="需可达且已建表的 MySQL（config_settings.yaml 的 mysql.url 指向已加载 schema 的库）",
 )
 
 
