@@ -11,6 +11,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 from math import ceil
+import ipaddress
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from sqlalchemy import select, delete, func
@@ -77,28 +79,47 @@ def _to_dict(obj, entity: str = "") -> dict:
 
 
 def _apply(obj, data: dict, entity: str):
+    """把请求体写入 ORM 对象（PATCH 语义）。
+
+    键的三种状态：
+      1) 键**不在** data 中 → 不改动（部分更新安全）；
+      2) 键在 data 中且值为 **None** → **显式清空**该字段。
+         前端 collectForm 把空输入统一转成 null，这就是「清空保存」的载体。
+         2026-09-05 修复：此前 `data[k] is not None` 会跳过 null，导致任何文本字段
+         （IP/域名、名称、账号…）清空后保存「成功」却回显旧值——看似删除无效。
+         NOT NULL 列不可置 None，此处跳过写入，由业务校验（_validate_endpoint）
+         给出明确 400，避免提交期才抛含糊的 IntegrityError。
+      3) 其余按列类型转换后写入。
+    """
     model = MODEL[entity]
     for k in EDITABLE[entity]:
-        if k in data and data[k] is not None:
-            v = data[k]
-            if entity == "rules" and k == "replace_to" and v == "":
-                v = None
+        if k not in data:
+            continue
+        v = data[k]
+        if v is None:
             col = getattr(model, k)
-            py = col.type.python_type
-            if py is int and not isinstance(v, int):
-                v = int(v)
-            elif py is float and not isinstance(v, float):
-                v = float(v)
-            elif py is Decimal:
-                # 数值列空串 = 清空（置 None）；其余转 Decimal 避免 float 写入精度/类型问题
-                if v == "" or v is None:
+            # nullable 未显式声明时为 None，按可空处理
+            if getattr(col, "nullable", True) is not False:
+                setattr(obj, k, None)
+            continue
+        if entity == "rules" and k == "replace_to" and v == "":
+            v = None
+        col = getattr(model, k)
+        py = col.type.python_type
+        if py is int and not isinstance(v, int):
+            v = int(v)
+        elif py is float and not isinstance(v, float):
+            v = float(v)
+        elif py is Decimal:
+            # 数值列空串 = 清空（置 None）；其余转 Decimal 避免 float 写入精度/类型问题
+            if v == "" or v is None:
+                v = None
+            elif not isinstance(v, Decimal):
+                try:
+                    v = Decimal(str(v))
+                except (InvalidOperation, ValueError, TypeError):
                     v = None
-                elif not isinstance(v, Decimal):
-                    try:
-                        v = Decimal(str(v))
-                    except (InvalidOperation, ValueError, TypeError):
-                        v = None
-            setattr(obj, k, v)
+        setattr(obj, k, v)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +263,87 @@ def _coerce(col, val: str):
     return val
 
 
+# ---------------------------------------------------------------------------
+# 接入点 / 落地网关：IP/域名 必填与格式校验（2026-09-05）
+# ---------------------------------------------------------------------------
+# 域名规则：单标签 1-63 字符、总长 <=253。纯数字点分串必须是合法 IPv4，
+# 否则视为残缺 IP（如 "111.22"）予以拒绝，避免借域名规则蒙混过关。
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
+_DOTTED_NUM_RE = re.compile(r"^[0-9.]+$")
+
+
+def _valid_host(host: str) -> bool:
+    """单个 IP/域名是否合法：IPv4 / IPv6 / 域名。"""
+    h = (host or "").strip()
+    if not h:
+        return False
+    if _DOTTED_NUM_RE.match(h):
+        try:
+            ipaddress.IPv4Address(h)
+            return True
+        except ValueError:
+            return False
+    try:
+        ipaddress.IPv6Address(h)
+        return True
+    except ValueError:
+        pass
+    return bool(_DOMAIN_RE.match(h))
+
+
+def _validate_endpoint(db, data: dict, entity: str, obj=None):
+    """接入点 / 落地网关的 IP/域名校验（必填 + 格式），不合法直接 400。
+
+    - 接入点 register_host：多值，逗号分隔。**点对点模式(auth_mode=0)必填**
+      （点对点靠来源 IP 识别接入点，留空则无法鉴权）；注册模式靠注册用户名识别，
+      IP 可留空 = 不校验来源 IP。
+    - 落地网关 ip：出局目标地址，单值且**必填**（列级 NOT NULL，此处给出明确错误，
+      而非提交期才抛含糊的 IntegrityError）。
+    - 只校验「本次提交涉及的字段」：data 未提交该字段时沿用库中现值校验，
+      两者都没变则跳过，保证 PATCH 语义下改其他字段不会被存量脏值阻塞。
+    """
+    if entity == "access-points":
+        has_host = "register_host" in data
+        has_mode = "auth_mode" in data
+        if not has_host and not has_mode:
+            return
+        raw = data["register_host"] if has_host else (obj.register_host if obj else None)
+        mode = data["auth_mode"] if has_mode else (obj.auth_mode if obj else None)
+        try:
+            mode_i = int(mode) if mode is not None else None
+        except (TypeError, ValueError):
+            mode_i = None
+        items = [x.strip() for x in (raw or "").split(",") if x.strip()]
+        if mode_i == 0 and not items:
+            raise HTTPException(
+                status_code=400,
+                detail="点对点模式的接入点必须填写 IP/域名（来源 IP 入局校验用）",
+            )
+        bad = [x for x in items if not _valid_host(x)]
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail="IP/域名格式不合法：%s（应为 IPv4/IPv6/域名，多个用英文逗号分隔）"
+                       % "、".join(bad),
+            )
+    elif entity == "gateways":
+        if "ip" not in data:
+            return
+        raw = data["ip"]
+        if raw is None or not str(raw).strip():
+            raise HTTPException(
+                status_code=400, detail="落地网关 IP/域名不能为空（出局目标地址）"
+            )
+        if not _valid_host(str(raw)):
+            raise HTTPException(
+                status_code=400,
+                detail="落地网关 IP/域名格式不合法：%s（应为 IPv4/IPv6/域名，不含端口）" % raw,
+            )
+
+
 def _reject_global_translate(data: dict):
     # 需求 #1：全局(owner_type=1)不允许变换规则(act=3)
     ot = data.get("owner_type")
@@ -304,6 +406,8 @@ async def update_entity(entity: str, item_id: int, request: Request, db: Session
     if entity == "sip-phones":
         # 形参名是 item_id（旧代码误写 obj_id → NameError → PUT /api/sip-phones/{id} 恒 500）
         _validate_phone(db, data, item_id)
+    if entity in ("access-points", "gateways"):
+        _validate_endpoint(db, data, entity, obj)
     _apply(obj, data, entity)
     if hasattr(obj, "updated_at"):
         obj.updated_at = _now()

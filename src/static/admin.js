@@ -15,7 +15,9 @@ const SECTIONS = {
     fields: [
       { k: 'name', label: '名称', type: 'text', required: true },
       { k: 'auth_mode', label: '对接模式', type: 'select', options: [{ v: 0, t: '点对点' }, { v: 1, t: '注册' }] },
-      { k: 'register_host', label: 'IP / 域名(联系地址)', type: 'text', hint: '多 IP/域名用逗号分隔；来源 IP 入局校验用' },
+      { k: 'register_host', label: 'IP / 域名(联系地址)', type: 'text', hostList: true,
+        requiredIf: { k: 'auth_mode', v: 0 },
+        hint: '多个用英文逗号分隔；来源 IP 入局校验用。点对点模式必填（靠来源 IP 识别接入点），注册模式可留空=不校验来源 IP' },
       { k: 'reg_username', label: '注册账号', type: 'text', hint: '点对点可留空；注册模式填 FS 注册用户名' },
       { k: 'reg_password', label: '注册密码', type: 'password' },
       { k: 'account_id', label: '租户/账户', type: 'select-src', src: '/api/accounts', optk: 'id', optt: 'name', optt2: 'account_number', required: true, hint: '接入点归属租户（Account）；费率回落与话机号段按此租户隔离' },
@@ -40,7 +42,8 @@ const SECTIONS = {
     fields: [
       { k: 'name', label: '名称', type: 'text', required: true },
       { k: 'carrier_id', label: '运营商', type: 'select-src', src: '/api/carriers/options', optk: 'id', optt: 'name', def: 1 },
-      { k: 'ip', label: 'IP', type: 'text', required: true },
+      { k: 'ip', label: 'IP', type: 'text', required: true, hostSingle: true,
+        hint: '出局目标地址：IPv4 / IPv6 / 域名，不含端口（端口填下方「端口」）' },
       { k: 'port', label: '端口', type: 'number', def: 5060 },
       { k: 'auth_type', label: '对接模式', type: 'select', options: [{ v: 0, t: '点对点' }, { v: 1, t: '注册' }] },
       { k: 'username', label: '账号', type: 'text' },
@@ -609,6 +612,37 @@ async function openForm(key, id) {
 }
 window.openForm = openForm;
 
+// IP/域名合法性校验：IPv4 / IPv6 / 域名。规则与后端 crud._valid_host 保持一致，
+// 前端先做即时反馈，后端仍会再校验一次（防绕过）。
+// 注：纯数字点分串必须是合法 IPv4，否则视为残缺 IP（如 "111.22"）予以拒绝。
+function isIPv4(s) {
+  const p = String(s).split('.');
+  if (p.length !== 4) return false;
+  for (let i = 0; i < 4; i++) {
+    if (!/^\d{1,3}$/.test(p[i])) return false;
+    if (p[i].length > 1 && p[i][0] === '0') return false;
+    if (Number(p[i]) > 255) return false;
+  }
+  return true;
+}
+function isIPv6(s) {
+  s = String(s);
+  if (s.indexOf(':') < 0) return false;
+  // 至少两个冒号：把 "192.168.1.1:5060"（IPv4 带端口）挡在门外——
+  // 端口应由 port 字段承载，与后端 ipaddress.IPv6Address 的判定保持一致。
+  if ((s.match(/:/g) || []).length < 2) return false;
+  if (s.split('::').length > 2) return false;
+  // 各段 1-4 位十六进制；末段允许点分形式（IPv4-mapped，如 ::ffff:192.168.1.1）
+  return /^[0-9A-Fa-f:]+(\.[0-9A-Fa-f:]+)*$/.test(s);
+}
+function validHost(h) {
+  const s = String(h || '').trim();
+  if (!s) return false;
+  if (/^[0-9.]+$/.test(s)) return isIPv4(s);
+  if (isIPv6(s)) return true;
+  return /^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/.test(s);
+}
+
 function collectForm() {
   const sec = SECTIONS[FORM_CTX.key];
   const body = {};
@@ -634,9 +668,28 @@ async function saveForm() {
   const sec = SECTIONS[key];
   if (!sec) { toast('未知模块: ' + key, true); return; }
   for (const f of sec.fields) {
-    if (f.required) {
+    // 条件必填：requiredIf={k:'auth_mode',v:0} 表示 auth_mode 选 0(点对点) 时本字段必填。
+    // 点对点靠来源 IP 识别接入点，留空则无法鉴权；注册模式靠用户名识别，IP 可留空。
+    const need = f.required || (f.requiredIf && (function () {
+      const t = document.getElementById('f_' + f.requiredIf.k);
+      return t && String(t.value) === String(f.requiredIf.v);
+    })());
+    if (need) {
       const el = document.getElementById('f_' + f.k);
       if (!el || el.value === '') { toast('请填写：' + f.label, true); return; }
+    }
+    // IP/域名格式预校验：hostList=多值逗号分隔(接入点)，hostSingle=单值(落地网关)
+    if (f.hostList || f.hostSingle) {
+      const el = document.getElementById('f_' + f.k);
+      if (el && el.value.trim()) {
+        const parts = f.hostList ? el.value.split(',') : [el.value];
+        const bad = parts.map(function (s) { return s.trim(); })
+          .filter(function (s) { return s && !validHost(s); });
+        if (bad.length) {
+          toast(f.label + ' 格式不合法：' + bad.join('、') + '（应为 IPv4/IPv6/域名）', true);
+          return;
+        }
+      }
     }
   }
   const body = collectForm();

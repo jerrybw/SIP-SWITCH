@@ -126,7 +126,10 @@ class AccessPoint(Base):
     auth_mode = mapped_column(SmallInteger, default=0)
     reg_username = mapped_column(String(128))
     reg_password = mapped_column(String(128))
-    register_host = mapped_column(String(45))
+    # 来源 IP/域名白名单，**多个用逗号分隔**（入局校验按逗号拆分后匹配）。
+    # 2026-09-05：原 varchar(45) 仅够放单个 IPv6(39 字符)，多值必然超长/截断，
+    # 与「多 IP 用逗号分隔」的设计冲突 → 扩到 512。
+    register_host = mapped_column(String(512))
     concurrent_limit = mapped_column(Integer, default=0)
     record_enabled = mapped_column(SmallInteger, default=1)
     # 计费单位(秒)：每接入点可配，最小 1s。CDR 计费时长 = ceil(通话秒/计费单位)*计费单位。

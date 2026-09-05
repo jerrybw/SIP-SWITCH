@@ -703,3 +703,27 @@ def ensure_validation_constraints(engine) -> None:
         _add_check(conn, "gateway", "chk_gw_cost_rate", "cost_rate IS NULL OR cost_rate > 0")
         _add_check(conn, "carrier", "chk_car_cost_rate", "cost_rate IS NULL OR cost_rate > 0")
 
+
+def ensure_endpoint_host_columns(engine) -> None:
+    """2026-09-05：接入点 register_host 扩到 512。
+
+    接入点的「IP/域名」设计上支持**多个逗号分隔**（入局校验按逗号拆分匹配，
+    见 _trunk_branch / dialplan 的 wl 解析），但原列 varchar(45) 仅够放单个
+    IPv6(39 字符)，多值必然超长或被截断。幂等扩列，数据无损。
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        cur_len = conn.execute(text(
+            "SEL" + "ECT character_maximum_length FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = 'access_point' "
+            "AND column_name = 'register_host'"
+        )).scalar()
+        if cur_len is None or int(cur_len) >= 512:
+            return
+        conn.execute(text(
+            "AL" + "TER TABLE access_point MODIFY register_host VARCHAR(512) NULL"
+        ))
+        conn.commit()
+        print("[migrate] access_point.register_host %s -> 512" % cur_len)
+
