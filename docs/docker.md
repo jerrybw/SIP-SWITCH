@@ -6,7 +6,7 @@
 ## 0. 前置条件
 
 - Docker 24+ 与 Docker Compose v2（`docker compose version`）
-- 宿主端口空闲：`8000/tcp`、`5060/udp`、`20000-20100/udp`（均可在 `.env` 改）
+- 宿主端口空闲：`8000/tcp`、`5060/udp`、`5080/udp`、`20000-20100/udp`（均可在 `.env` 改；`5060`=internal 话机注册，`5080`=external 落地网关出局）
 
 ## 1. 配置
 

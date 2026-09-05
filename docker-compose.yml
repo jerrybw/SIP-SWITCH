@@ -38,7 +38,11 @@ services:
       FS_CONF_DIR: ${FS_CONF_DIR:-/etc/freeswitch}
       FS_COMMAND: ${FS_COMMAND:-freeswitch -c -nonat}
     ports:
+      # internal profile：话机注册 / 入局来话（默认 5060）
       - "${SIP_PORT:-5060}:5060/udp"
+      # external profile：落地网关出局 / 运营商来话（默认 5080），bridge 经 sofia/gateway/<name> 走此端口
+      - "${SIP_PORT_EXT:-5080}:5080/udp"
+      # RTP 媒体端口范围（internal/external 共用）
       - "${RTP_RANGE:-20000-20100}:${RTP_RANGE:-20000-20100}/udp"
     volumes:
       - ./deploy/fs-config:/fs-config:ro

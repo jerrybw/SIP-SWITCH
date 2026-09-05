@@ -9,6 +9,7 @@ PyMySQL==1.2.0                     # MySQL 驱动（mysql+pymysql://...）
 PyYAML==6.0.3                     # 读取 config_settings.yaml
 Jinja2==3.1.6                     # 管理端页面模板
 python-multipart==0.0.32          # FastAPI 解析 form（/fs/directory POST、登录）
+httpx==0.28.1                     # 测试用：fastapi TestClient（tests/test_auth_t301.py）依赖；CI 干净环境需显式安装（python-esl 注释后无包会带它）
 
 # FreeSWITCH ESL 客户端依赖（代码中 `from ESL import ESLconnection`）。
 # 注意：部署 venv 中该包以「未纳入 pip 元数据」的方式存在（pip show/python -l 均查不到版本），
