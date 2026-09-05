@@ -1,9 +1,14 @@
-import os, sys, subprocess, logging, threading
-from core.config import settings
+import os, logging, threading
+from fs_esl_cmd import fs_api
 log = logging.getLogger("fs_provision")
-FSD = "/usr/local/freeswitch/etc/freeswitch/sip_profiles/external"
-FSC = "/usr/local/freeswitch/bin/fs_cli"
-PROF = "external"
+
+# 落地网关 XML 落盘目录（一期方案 A：网关与 FS 共享该卷）。
+# 容器部署时可用环境变量覆盖，以适配不同 FS 镜像的配置路径。
+FSD = os.environ.get(
+    "FS_SIP_PROFILES_EXTERNAL",
+    "/usr/local/freeswitch/etc/freeswitch/sip_profiles/external",
+)
+PROF = os.environ.get("FS_EXTERNAL_PROFILE", "external")
 
 
 def bgw(gw):
@@ -34,27 +39,30 @@ def gpath(n):
 
 def wxml(gw):
     x = bgw(gw); p = gpath(gw.name); open(p, "w").write(x); log.info("wrote %s", p); return p
+
+
 def rescan(prof=PROF):
+    """异步重扫 sofia profile。
+
+    经 ESL 下发（容器镜像内无 fs_cli）；ESL 不可用时 fs_esl_cmd 自动回退本机 fs_cli。
+    """
     def _run():
-        try:
-            _esl = settings.get("esl", {})
-            cmd = [FSC]
-            if _esl.get("host"): cmd += ["-H", str(_esl["host"])]
-            if _esl.get("port"): cmd += ["-P", str(_esl["port"])]
-            if _esl.get("password"): cmd += ["-p", str(_esl["password"])]
-            cmd += ["-x", "sofia profile %s rescan" % prof]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            o = (r.stdout or "")+(r.stderr or ""); log.info("rescan %s: %s", prof, o.strip())
-        except Exception as e:
-            log.error("rescan fail: %s", e)
+        out = fs_api("sofia profile %s rescan" % prof)
+        if out.strip():
+            log.info("rescan %s: %s", prof, out.strip())
+        else:
+            log.error("rescan %s: no output (ESL/fs_cli 均不可用?)", prof)
     threading.Thread(target=_run, daemon=True).start()
     return "async"
+
 
 def provision(gw):
     try:
         p = wxml(gw); o = rescan(); return {"ok": True, "path": p, "rescan": o.strip()}
     except Exception as e:
         log.error("provision fail: %s", e); return {"ok": False, "error": str(e)}
+
+
 def remove_xml(n):
     p = gpath(n)
     if os.path.exists(p):

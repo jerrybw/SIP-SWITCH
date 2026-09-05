@@ -1,0 +1,10 @@
+<configuration name="event_socket.conf" description="Socket Client">
+  <settings>
+    <param name="nat-map" value="false"/>
+    <!-- 监听 0.0.0.0：gateway 在独立容器里，需跨容器访问 ESL -->
+    <param name="listen-ip" value="0.0.0.0"/>
+    <param name="listen-port" value="8021"/>
+    <!-- __ESL_PASSWORD__ 由 docker-entrypoint-fs.sh 用环境变量渲染，避免明文入仓 -->
+    <param name="password" value="__ESL_PASSWORD__"/>
+  </settings>
+</configuration>

@@ -1,0 +1,78 @@
+name: sip-switch
+
+# SIP-SWITCH 全栈一键起（dev / 演示版）
+# 用法见 docs/docker.md
+
+services:
+  mysql:
+    image: mysql:8.0
+    command: >-
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_general_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 纯结构 schema（无数据），空库启动时自动建全表
+      - ./deploy/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - sipnet
+
+  freeswitch:
+    image: ${FS_IMAGE:-signalwire/freeswitch:latest}
+    environment:
+      ESL_PASSWORD: ${ESL_PASSWORD}
+      GATEWAY_URL: http://gateway:8000
+      RTP_START: ${RTP_START:-20000}
+      RTP_END: ${RTP_END:-20100}
+      FS_CONF_DIR: ${FS_CONF_DIR:-/etc/freeswitch}
+      FS_COMMAND: ${FS_COMMAND:-freeswitch -c -nonat}
+    ports:
+      - "${SIP_PORT:-5060}:5060/udp"
+      - "${RTP_RANGE:-20000-20100}:${RTP_RANGE:-20000-20100}/udp"
+    volumes:
+      - ./deploy/fs-config:/fs-config:ro
+      # 落地网关 XML 共享卷：网关写、FS 读（一期方案 A）
+      - fs-profiles:/fs-profiles
+    entrypoint: ["/fs-config/docker-entrypoint-fs.sh"]
+    command: ["sh", "-c", "exec ${FS_COMMAND}"]
+    networks:
+      - sipnet
+
+  gateway:
+    build:
+      context: .
+      args:
+        FS_IMAGE: ${FS_IMAGE:-signalwire/freeswitch:latest}
+    environment:
+      GATEWAY_CONFIG: /app/config/config_settings.yaml
+      FS_SIP_PROFILES_EXTERNAL: /fs-profiles
+    volumes:
+      # 首次运行前：cp config/docker/config.example.yaml config/docker/config_settings.yaml
+      - ./config/docker:/app/config:ro
+      - fs-profiles:/fs-profiles
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - sipnet
+
+volumes:
+  mysql-data:
+  fs-profiles:
+
+networks:
+  sipnet:
+    driver: bridge

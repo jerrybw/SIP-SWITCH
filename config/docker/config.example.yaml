@@ -1,0 +1,37 @@
+# SIP-SWITCH 容器内配置模板（Docker / compose 专用）
+#
+# 用法：
+#   1. cp config/docker/config.example.yaml config/docker/config_settings.yaml
+#   2. 把下面 <...> 占位替换为真实值（尤其是 auth 段，否则无法登录管理端）
+#   3. config_settings.yaml 已被 .gitignore 忽略，禁止提交。
+#
+# 注意：值为「裸写、无引号」的 YAML 标量 —— 凭据字符集限定 [A-Za-z0-9_-] 且以字母开头，
+#       否则会破坏 YAML 解析。
+#
+# 主机名说明：compose 内用服务名互访，因此这里是 mysql / freeswitch，不是 127.0.0.1。
+
+esl:
+  host: freeswitch              # compose 服务名
+  port: 8021
+  password: change-me-esl       # 必须与 .env 的 ESL_PASSWORD 一致
+  reconnect_interval: 5
+  fs_node_uuid:
+  recordings_dir: /var/lib/freeswitch/recordings
+
+api:
+  host: 0.0.0.0
+  port: 8000
+
+mysql:
+  # 用户/密码/库名与 .env 的 MYSQL_* 保持一致，主机名用 compose 服务名 mysql
+  url: mysql+pymysql://sip_switch:change-me@mysql:3306/sip_switch?charset=utf8mb4
+  pool_recycle: 3600
+
+prepaid_enabled: false          # true=预付费（余额不足 603 拒呼 + 挂断后扣费）；false=纯监控不计费
+
+auth:
+  admin_user: admin
+  password_salt: <random-salt>                 # secrets.token_hex(24)
+  admin_password_hash: <sha256-salt-password>  # sha256(password_salt + 明文密码).hexdigest()
+  jwt_secret: <random-secret>                  # secrets.token_hex(24)
+  token_expire_minutes: 120

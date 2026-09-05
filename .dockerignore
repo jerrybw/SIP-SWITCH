@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+cdr_spool/
+dev_history/
+docs/
+tests/
+.git/
+.gitignore
+*.bak*
+*.db
+*.log
+config_settings.yaml
+.env
+deploy/mysql/init/

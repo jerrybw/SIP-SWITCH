@@ -25,3 +25,9 @@ dev_history/
 .idea/
 .vscode/
 .DS_Store
+
+# ===== Docker (dev/演示) =====
+.env
+.env.*
+!.env.example
+config/docker/config_settings.yaml

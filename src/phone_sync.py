@@ -1,35 +1,20 @@
 import logging
 import threading
 import time
-import subprocess
 from datetime import datetime
 
-from core.config import settings
+from fs_esl_cmd import fs_api
 from db.session import SessionLocal
 from db.models import SipPhone, AccessPoint, SystemSetting
 from sqlalchemy import select
 
 log = logging.getLogger("phone_sync")
-FSC = "/usr/local/freeswitch/bin/fs_cli"
 _stop = False
 
 
 def _fs_reg_text():
-    try:
-        _esl = settings.get("esl", {})
-        cmd = [FSC]
-        if _esl.get("host"):
-            cmd += ["-H", str(_esl["host"])]
-        if _esl.get("port"):
-            cmd += ["-P", str(_esl["port"])]
-        if _esl.get("password"):
-            cmd += ["-p", str(_esl["password"])]
-        cmd += ["-x", "show registrations"]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        return (r.stdout or "") + (r.stderr or "")
-    except Exception as e:
-        log.warning("reg query failed: %s", e)
-        return ""
+    """取 FS 注册列表文本（经 ESL；无 fs_cli 依赖）。"""
+    return fs_api("show registrations")
 
 
 def _setting(db, key, default):
