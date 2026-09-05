@@ -23,7 +23,9 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# 国内网络下 PyPI 默认不可达，默认走阿里云镜像；可 --build-arg PIP_INDEX_URL=... 覆盖
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN pip install --no-cache-dir -i "${PIP_INDEX_URL}" -r requirements.txt
 
 # 安装 ESL python 绑定（来自 stage 1）
 COPY --from=fsesl /esl-out /tmp/esl-out
