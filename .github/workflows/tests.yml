@@ -54,6 +54,7 @@ jobs:
           if conn is None:
               raise SystemExit("MySQL not ready")
           cur = conn.cursor()
+          cur.execute("SET FOREIGN_KEY_CHECKS=0")
           for stmt in sql.split(";\n"):
               s = stmt.strip()
               if s:
