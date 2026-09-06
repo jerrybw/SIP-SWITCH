@@ -4,7 +4,7 @@
 # 这里用多阶段构建，从 FreeSWITCH 镜像里取出 ESL 的 Python 绑定（ESL.py + _ESL*.so）。
 # 若所用 FS 镜像内没有 ESL 绑定，构建会打印 WARN 并继续（ESL 功能降级，见 docs/docker.md 排错）。
 
-ARG FS_IMAGE=signalwire/freeswitch:latest
+ARG FS_IMAGE=sip-switch-fs:1.11.2
 
 # ---------- stage 1：从 FS 镜像收集 ESL python 绑定 ----------
 FROM ${FS_IMAGE} AS fsesl

@@ -17,6 +17,21 @@ cp config/docker/config.example.yaml config/docker/config_settings.yaml
 
 编辑 `.env`，至少改 `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `ESL_PASSWORD`。
 
+## 1.5 首次启动前：构建 FreeSWITCH 镜像
+
+Docker Hub 上没有可用的 FS 运行时镜像（详见 §6），因此**必须本地编译一次**：
+
+```bash
+# 1) 拉取官方编译基座（约 1.4 GB）
+docker pull signalwire/freeswitch-public-base:latest
+
+# 2) 从 v1.11.2 源码编译并打标签（JOBS 建议设为主机核数）
+docker build -f deploy/fs-image/Dockerfile   --build-arg FS_REF=v1.11.2   --build-arg JOBS=8   -t sip-switch-fs:1.11.2 .
+```
+
+产物是与生产同版本（1.11.2）的运行时镜像，内含 `mod_xml_curl`、`mod_event_socket` 与 ESL python 绑定。
+编译一次后 `docker compose up -d` 会直接复用，不再重编。编译约 30–60 分钟，取决于 CPU。
+
 生成管理端凭据（填进 `config/docker/config_settings.yaml` 的 `auth` 段）：
 
 ```bash
@@ -62,22 +77,30 @@ docker compose logs -f gateway
 |---|---|---|
 | 构建时 `[build] WARN: ESL python 绑定未找到` | 所用 FS 镜像没带 ESL python 绑定 | 换带绑定的 FS 镜像，或改从 FS 源码 `libs/esl` 构建（改 `Dockerfile` stage 1） |
 | gateway 日志 `ESL connect failed` | `ESL_PASSWORD` 与配置不一致 / `esl.host` 不对 | 核对 `.env` 与 `config_settings.yaml` 的 `esl.password`；`esl.host` 必须是 `freeswitch` |
-| FS 起不来或找不到配置 | 镜像内配置目录不是 `/etc/freeswitch` | 改 `.env` 的 `FS_CONF_DIR`（源码安装通常是 `/usr/local/freeswitch/etc/freeswitch`） |
+| FS 起不来或找不到配置 | 镜像内配置目录与 `FS_CONF_DIR` 不一致 | 自建镜像已默认 `/usr/local/freeswitch/etc/freeswitch`；换镜像时改 `.env` 的 `FS_CONF_DIR` |
 | FS 进程没起来 | 启动命令不匹配 | 改 `.env` 的 `FS_COMMAND`，看 `docker compose logs freeswitch` |
 | 通话接通但无语音 | RTP 端口范围与映射不一致 | `.env` 的 `RTP_START/RTP_END` 必须与 `RTP_RANGE` 一致；宿主端口被占用则整体换一段 |
 | 页面报缺表 | schema 未执行 | 确认 `deploy/mysql/init/01-schema.sql` 已挂载；删卷重来：`docker compose down -v && docker compose up -d` |
 | xml_curl 取不到 dialplan | FS 连不上 gateway | 容器内 `GATEWAY_URL` 默认 `http://gateway:8000`；确认 gateway 已监听 8000 |
 
-## 6. 已知未验证项
+## 6. 未验证项 → 实跑结论（2026-09-06）
 
-本套文件在**未安装 Docker 的环境**中编写，以下需实跑确认：
+本套文件最初在**未安装 Docker 的环境**中编写（下称「盲写」）。以下 4 项已在 WSL2 + Docker 24.0.9 环境核实：
 
-1. `signalwire/freeswitch` 镜像是否存在、实际版本号、是否编译进 `mod_xml_curl` / `mod_event_socket`
-2. 该镜像内 FS 配置目录路径、以及是否自带 ESL python 绑定
-3. `switch.conf.xml` 的 RTP 注入 sed 是否命中（不同镜像文件布局可能不同）
-4. external profile 的 `X-PRE-PROCESS include` 指向共享卷绝对路径是否被该镜像接受
+| # | 盲写假设 | 实跑结论 |
+|---|---|---|
+| 1 | `signalwire/freeswitch` 镜像存在 | ❌ **不存在**。经镜像源返回 `denied`、直连 Docker Hub 返回 `connection reset by peer`。同名可拉的只有 `signalwire/freeswitch-public-base`，但它是**编译基座**（只有依赖与工具链），`which freeswitch` 为空、无 `/usr/local/freeswitch` |
+| 2 | 配置目录为 `/etc/freeswitch`，且镜像自带 ESL python 绑定 | ❌ 均不成立。源码安装（prefix=`/usr/local/freeswitch`）的配置在 **`/usr/local/freeswitch/etc/freeswitch`**；ESL python 绑定不在镜像内，需从源码 `libs/esl` 用 `make py3mod` 构建 |
+| 3 | `switch.conf.xml` 的 RTP 注入 sed 命中 | ⏳ 待 compose 实跑确认 |
+| 4 | external profile 的 `X-PRE-PROCESS include` 接受共享卷绝对路径 | ⏳ 待 compose 实跑确认 |
 
-确认后请回填本文档与 `docs/Docker化设计方案.md`。
+顺带核实的其他硬事实：
+
+- SignalWire 官方 apt 源 `freeswitch.signalwire.com/repo/deb/debian-release` 返回 **401 Unauthorized** —— 匿名装不了包，需 signalwire.com 账号 PAT。
+- `files.freeswitch.org/releases/freeswitch/freeswitch-1.11.2.tar.gz` 返回 **404**；但 github 上 `signalwire/freeswitch` 的 **v1.11.2 tag 存在**，故自建走源码编译。
+- 生产环境（Ubuntu 24.04）的同版本构建参数为 `./configure --prefix=/usr/local/freeswitch --disable-core-pgsql`，已原样写进 `deploy/fs-image/Dockerfile`。
+- `freeswitch` 二进制在 `/usr/local/freeswitch/bin`，**不在 PATH**；自建镜像已把该路径写进 `ENV PATH`。
+- 社区镜像 `ghcr.io/chapimenge3/freeswitch:latest` 默认加载 `mod_xml_curl`，可作临时替代快速验证（版本为 1.10.x，与生产 1.11.2 不一致）。
 
 ## 7. 清理
 

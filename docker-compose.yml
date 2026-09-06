@@ -29,13 +29,22 @@ services:
       - sipnet
 
   freeswitch:
-    image: ${FS_IMAGE:-signalwire/freeswitch:latest}
+    # 默认自建镜像：Docker Hub 无 signalwire/freeswitch 运行时镜像，见 deploy/fs-image/Dockerfile
+    image: ${FS_IMAGE:-sip-switch-fs:1.11.2}
+    build:
+      context: .
+      dockerfile: deploy/fs-image/Dockerfile
+      args:
+        FS_BASE: ${FS_BASE:-signalwire/freeswitch-public-base:latest}
+        FS_REF: ${FS_REF:-v1.11.2}
+        JOBS: ${FS_JOBS:-8}
     environment:
       ESL_PASSWORD: ${ESL_PASSWORD}
       GATEWAY_URL: http://gateway:8000
       RTP_START: ${RTP_START:-20000}
       RTP_END: ${RTP_END:-20100}
-      FS_CONF_DIR: ${FS_CONF_DIR:-/etc/freeswitch}
+      # 源码安装布局；官方镜像布局为 /etc/freeswitch
+      FS_CONF_DIR: ${FS_CONF_DIR:-/usr/local/freeswitch/etc/freeswitch}
       FS_COMMAND: ${FS_COMMAND:-freeswitch -c -nonat}
     ports:
       # internal profile：话机注册 / 入局来话（默认 5060）
@@ -57,7 +66,7 @@ services:
     build:
       context: .
       args:
-        FS_IMAGE: ${FS_IMAGE:-signalwire/freeswitch:latest}
+        FS_IMAGE: ${FS_IMAGE:-sip-switch-fs:1.11.2}
     environment:
       GATEWAY_CONFIG: /app/config/config_settings.yaml
       FS_SIP_PROFILES_EXTERNAL: /fs-profiles
