@@ -6,11 +6,11 @@
 #     不含 freeswitch 本体（which freeswitch 为空、无 /usr/local/freeswitch）。
 #   - SignalWire 官方 apt 源（freeswitch.signalwire.com）返回 401，匿名装不了包。
 #
-# 依赖说明（已核实 configure.ac 与发布包 modules.conf）：
+# 依赖说明（已核实 configure.ac 与发布包 build/modules.conf.in）：
 #   - sofia-sip-ua >= 1.13.18  必装（mod_sofia 的 SIP 栈）
 #   - spandsp      >= 3.1.1    必装（DSP/传真，生产环境同样编了）
 #   - libks2 / signalwire_client2 只在 mod_verto(WebRTC) / mod_signalwire 启用时才需要，
-#     本镜像用不到这两个模块，已在 modules.conf 中禁用，故跳过其编译。
+#     本镜像用不到这两个模块，已在 build/modules.conf.in 中禁用，故跳过其编译。
 #   - 注意：FS v1.11.2 没有 .gitmodules，libs/ 里不含上述依赖，必须在编译 FS 前装好。
 #
 # 构建：
@@ -20,6 +20,7 @@
 #   --build-arg SOFIA_REF=v1.13.18    sofia-sip tag
 #   --build-arg SPANDSP_REF=v3.1.1    spandsp tag
 #   --build-arg JOBS=8                编译并发数
+#   --build-arg GIT_SSL_NO_VERIFY=1   仅当构建机处于 MITM 代理后(自签 CA)时设为 1；默认留空开启校验
 
 ARG FS_BASE=signalwire/freeswitch-public-base:latest
 
@@ -34,6 +35,10 @@ ARG JOBS=8
 # pkg-config 需要能找到装到 /usr/local 的 .pc 文件
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH}
 ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
+# 受限网络(MITM 代理)下 git clone github 会因自签 CA 报证书错误，需关闭校验。
+# 默认留空(开启校验)；仅当构建机处于 MITM 代理后才传 --build-arg GIT_SSL_NO_VERIFY=1。
+ARG GIT_SSL_NO_VERIFY=
+ENV GIT_SSL_NO_VERIFY=
 
 # 预检：ESL 的 python 绑定需要 swig 与 python3-dev（缺失时尝试 apt 补装，失败仅告警）
 RUN (command -v swig && command -v python3-config) \
@@ -56,17 +61,23 @@ WORKDIR /usr/src/freeswitch
 
 # 模块开关：启用 mod_xml_curl（发布包里默认是注释掉的，不打开就编不出 xml_curl 模块）；
 # 禁用 mod_verto / mod_signalwire 以跳过 libks2 与 signalwire_client2 依赖。
-# 用宽容正则改写，避免不同版本 modules.conf 的路径/注释形态差异导致漏改。
-RUN sed -i -E "/mod_xml_curl/s@^#@@" modules.conf \
- && sed -i -E "/mod_verto/s@^#?@#@" modules.conf \
- && sed -i -E "/mod_signalwire/s@^#?@#@" modules.conf \
- && echo "--- modules.conf 关键项 ---" \
- && grep -nE "mod_xml_curl|mod_event_socket|mod_verto|mod_signalwire" modules.conf \
+# 用宽容正则改写，避免不同版本 build/modules.conf.in 的路径/注释形态差异导致漏改。
+RUN sed -i -E "/mod_xml_curl/s@^#@@" build/modules.conf.in \
+ && sed -i -E "/mod_verto/s@^#?@#@" build/modules.conf.in \
+ && sed -i -E "/mod_signalwire/s@^#?@#@" build/modules.conf.in \
+ && echo "--- build/modules.conf.in 关键项 ---" \
+ && grep -nE "mod_xml_curl|mod_event_socket|mod_verto|mod_signalwire" build/modules.conf.in \
  && echo "--- 断言：mod_verto / mod_signalwire 必须已禁用，否则 configure 会因缺 libks2 报错 ---" \
- && ! grep -qE "^[^#]*mod_(verto|signalwire)" modules.conf
+ && ! grep -qE "^[^#]*mod_(verto|signalwire)" build/modules.conf.in
 
 RUN ./bootstrap.sh -j
 # configure 参数与生产环境保持一致（见生产 /usr/src/freeswitch-1.11.2/config.log）
+# Debian buster 已 EOL(2022 起归档)：官方 deb.debian.org 源失效，必须改用 aliyun 归档源才能装依赖。
+# 若构建时传了 --build-arg http_proxy/https_proxy，docker 会自动注入到 RUN 环境，
+# 而该代理只转发 github 流量，会让 apt 拉 aliyun 失败，故 apt 命令前清空 proxy 变量直连
+# （未传代理 build-arg 时这些清空是空操作，不影响普通环境构建）。
+RUN echo "deb http://mirrors.aliyun.com/debian-archive/debian buster main" > /etc/apt/sources.list && echo "deb http://mirrors.aliyun.com/debian-archive/debian buster-updates main" >> /etc/apt/sources.list && echo "deb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main" >> /etc/apt/sources.list && rm -f /etc/apt/sources.list.d/freeswitch.list /etc/apt/sources.list.d/github-cli.list && http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= apt-get update && http_proxy= http_proxy= HTTP_PROXY= HTTPS_PROXY= apt-get install -y --no-install-recommends build-essential automake autoconf libtool libncurses5-dev libjpeg-dev libpng-dev libsqlite3-dev libcurl4-openssl-dev libpcre2-dev libspeex-dev libspeexdsp-dev libopus-dev libtiff5-dev libxml2-dev libldap2-dev libedit-dev libvpx-dev libmemcached-dev libpq-dev unixodbc-dev libsrtp2-dev libldns-dev libsndfile1-dev libmagic-dev libssl-dev
+
 RUN ./configure --prefix=/usr/local/freeswitch --disable-core-pgsql
 RUN make -j${JOBS}
 RUN make install
