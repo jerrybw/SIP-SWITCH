@@ -55,8 +55,8 @@ services:
       - "${RTP_RANGE:-20000-20100}:${RTP_RANGE:-20000-20100}/udp"
     volumes:
       - ./deploy/fs-config:/fs-config:ro
-      # 落地网关 XML 共享卷：网关写、FS 读（一期方案 A）
-      - fs-profiles:/fs-profiles
+      # 落地网关 XML 共享卷：网关写 /fs-profiles，FS 经 sip_profiles/external 相对 include 读取（一期方案 A）
+      - fs-profiles:/usr/local/freeswitch/etc/freeswitch/sip_profiles/external
     entrypoint: ["/fs-config/docker-entrypoint-fs.sh"]
     command: ["sh", "-c", "exec ${FS_COMMAND}"]
     networks:

@@ -11,7 +11,7 @@ ESL_PASSWORD="${ESL_PASSWORD:-ClueCon}"
 RTP_START="${RTP_START:-20000}"
 RTP_END="${RTP_END:-20100}"
 
-mkdir -p "$FS_CONF_DIR/autoload_configs" "$FS_CONF_DIR/sip_profiles" /fs-profiles
+mkdir -p "$FS_CONF_DIR/autoload_configs" "$FS_CONF_DIR/sip_profiles/external"
 
 # 1) 渲染配置：占位符 -> 环境变量
 for f in /fs-config/autoload_configs/*.conf.xml; do
@@ -23,7 +23,10 @@ for f in /fs-config/autoload_configs/*.conf.xml; do
   echo "[entrypoint] rendered autoload_configs/$b"
 done
 
-# 落地网关 include 路径已改为共享卷 /fs-profiles
+# 落地网关 include 路径：共享卷挂到 sip_profiles/external，
+# external.xml 用相对 include external/*.xml 读取（与 vanilla example.xml 同机制）。
+# 注意：FS 仅在进程启动时展开该 include glob；新增/修改网关文件后需重启 FS 进程，
+#       reloadxml / sofia profile external rescan|restart 均不会发现新文件。
 if [ -f /fs-config/sip_profiles/external.xml ]; then
   cp /fs-config/sip_profiles/external.xml "$FS_CONF_DIR/sip_profiles/external.xml"
   echo "[entrypoint] installed sip_profiles/external.xml"

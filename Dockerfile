@@ -34,7 +34,8 @@ RUN set -e; \
     if [ -f /tmp/esl-out/ESL.py ]; then \
       cp /tmp/esl-out/ESL.py "$SP"/; \
       cp /tmp/esl-out/_ESL*.so "$SP"/ 2>/dev/null || true; \
-      python -c "import ESL; print('[build] ESL ok')"; \
+      python -c "import ESL; print('[build] ESL ok')" || \
+        echo "[build] WARN: ESL import failed -- ABI mismatch: FS image _ESL.so is built against Debian buster python3.7 and links libpython3.7m.so.1.0, which is absent in this runtime (project needs Python>=3.9 for FastAPI). ESL is degraded; gateway stays functional via the fallback chain in src/fs_esl_cmd.py."; \
     else \
       echo "[build] WARN: ESL python 绑定未在 FS 镜像中找到，ESL 功能将不可用"; \
       cat /tmp/esl-out/MISSING 2>/dev/null || true; \
