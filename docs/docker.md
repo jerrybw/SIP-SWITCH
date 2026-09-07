@@ -99,6 +99,9 @@ docker compose logs -f gateway
 - SignalWire 官方 apt 源 `freeswitch.signalwire.com/repo/deb/debian-release` 返回 **401 Unauthorized** —— 匿名装不了包，需 signalwire.com 账号 PAT。
 - `files.freeswitch.org/releases/freeswitch/freeswitch-1.11.2.tar.gz` 返回 **404**；但 github 上 `signalwire/freeswitch` 的 **v1.11.2 tag 存在**，故自建走源码编译。
 - 生产环境（Ubuntu 24.04）的同版本构建参数为 `./configure --prefix=/usr/local/freeswitch --disable-core-pgsql`，已原样写进 `deploy/fs-image/Dockerfile`。
+- FS v1.11.2 在 github 上没有 `.gitmodules`，`libs/` 里不含 sofia-sip / spandsp / libks，这四个依赖必须由外部提供（生产环境装在 `/usr/local/lib`）。
+- `configure.ac` 表明 `libks2` 仅在启用 `mod_verto` 时必需、`signalwire_client2` 仅在启用 `mod_signalwire` 时必需；自建镜像已禁用这两个模块（WebRTC / SignalWire 云连接用不到），从而跳过其编译。
+- 发布包 `modules.conf` 默认把 `xml_int/mod_xml_curl` 注释掉了，必须打开，否则编出来的 FS 没有 xml_curl 模块（本项目靠它拉 dialplan / directory）。
 - `freeswitch` 二进制在 `/usr/local/freeswitch/bin`，**不在 PATH**；自建镜像已把该路径写进 `ENV PATH`。
 - 社区镜像 `ghcr.io/chapimenge3/freeswitch:latest` 默认加载 `mod_xml_curl`，可作临时替代快速验证（版本为 1.10.x，与生产 1.11.2 不一致）。
 
