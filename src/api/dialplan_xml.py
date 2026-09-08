@@ -139,7 +139,7 @@ _ALWAYS_SWITCH_CAUSES = (
     "UNALLOCATED_NUMBER",           # 空号（404）
     # —— 对端无响应/超时：出局 INVITE 发出后石沉大海（对端不可达、防火墙丢包）时，
     #    FS 以 NO_ANSWER/PROGRESS_TIMEOUT 结束而非 5xx，漏配会导致整条 failover 链不切换
-    #    （2026-09-08 实测：gw-carrier-b 111.8.135.14 不可达 → NO_ANSWER → switch_count=0）。
+    #    （2026-09-08 实测：gw-carrier-b <CARRIER_B_PUBLIC_IP_REDACTED> 不可达 → NO_ANSWER → switch_count=0）。
     "NO_ANSWER",                    # 无任何响应，超时挂断
     "PROGRESS_TIMEOUT",             # 有 18x 但久不应答
     "NO_USER_RESPONSE",             # 480 用户无响应

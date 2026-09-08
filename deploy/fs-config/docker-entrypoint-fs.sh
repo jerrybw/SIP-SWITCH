@@ -13,7 +13,11 @@ if [ -z "${EXT_SIP_IP}" ]; then
   echo "[entrypoint] WARN: WSL 重启/IP 变更后请执行 ./dev-up.sh 重新注入" >&2
   EXT_SIP_IP='$${local_ip_v4}'
 fi
-ESL_PASSWORD="${ESL_PASSWORD:-ClueCon}"
+if [ -z "${ESL_PASSWORD}" ]; then
+  echo "[entrypoint] WARN: ESL_PASSWORD 未注入，生成随机 ESL 密码（避免默认 ClueCon）" >&2
+  ESL_PASSWORD=$(head -c 48 /dev/urandom | base64 | tr -d "/+=" | head -c 32)
+  echo "[entrypoint] 本次生成的 ESL_PASSWORD=${ESL_PASSWORD}（仅本次容器生命周期有效）" >&2
+fi
 RTP_START="${RTP_START:-20000}"
 RTP_END="${RTP_END:-20100}"
 
