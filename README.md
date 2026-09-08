@@ -19,6 +19,10 @@
   费率链 `NULL` 或 `<=0` 视为「未配置」继续回落；预付费余额不足 603 拒呼、挂断后扣费。
 - **运营后台**：FastAPI 提供 REST CRUD + Jinja 管理页（`/admin`），T-301 鉴权（JWT + HttpOnly Cookie）。
 - **DB 层校验兜底**：17 个 CHECK 约束，即便直接写库绕过应用层也能兜住号码位数 / NOT NULL / 数值下限 / 费率取值。
+- **ESL 纯 socket 客户端（P0）**：`src/fs_esl_socket.py` 自建 ESL 客户端，摆脱 python-esl 绑定
+  （ABI 不匹配时不可用）；自带 URL 编码 / Content-Length 分帧 / 60s 探活与看门狗重连。
+- **访问控制下沉**：FS 的 SIP profile 默认对公网放开，来源 IP 白名单交给
+  服务器防火墙（安全组 / iptables）+ 网关侧接入点授权（未命中即 `603 no_access_point`）。
 
 ---
 
@@ -178,6 +182,38 @@ make -j"$(nproc)" && make install      # 默认装到 /usr/local/freeswitch
 
 ---
 
+## 部署形态与对外地址（ext-sip-ip）
+
+FreeSWITCH 需要在 SIP 的 Contact / Via 与 SDP `c=` 行里**通告一个对端可达的地址**，
+即 `ext-sip-ip` / `ext-rtp-ip`。它**不是**机器自己的网卡 IP（容器场景尤其如此）。
+配错的后果逐级恶化：注册 Contact 错 → 信令回包丢失（`NO_ANSWER` / `408`）→
+**SDP 地址错导致单通或全哑（最常见）** → BYE 发不到 → 话单卡在 `end_time IS NULL`。
+
+本项目两种部署形态的取值逻辑不同：
+
+| | DEV（WSL + docker compose） | 生产（Lighthouse 原生部署） |
+|---|---|---|
+| 部署方式 | `docker compose up -d`（mysql / freeswitch / gateway / sipp-stub） | FS 原生安装（systemd `freeswitch.service`）+ 网关 venv（`sip-gateway.service`） |
+| FS 真实 IP | 容器内网 `172.18.0.2`（局域网不可达） | 私网 `LIGHTHOUSE_PRIVATE_IP_REDACTED`（公网不可达） |
+| 对外地址来源 | 环境变量 `EXT_SIP_IP`，由 `dev-up.sh` 每次探测 WSL eth0 IP 注入 | `vars.xml` 的 `stun-set` 向 `stun.freeswitch.org` 探测，写入 `$${external_sip_ip}` |
+| 生效值示例 | `WSL_IP_REDACTED` | `LIGHTHOUSE_PUBLIC_IP_REDACTED` |
+| 关联配置 | `deploy/fs-config/sip_profiles/internal.xml`（占位符 `__EXT_SIP_IP__`，由 entrypoint 渲染） | `sip_profiles/internal.xml` 与 `external.xml` 直接引用 `$${external_sip_ip}` |
+
+> ⚠️ **WSL 重启后 IP 会漂移**（实测 `WSL_IP_REDACTED` → `WSL_IP_REDACTED`，docker 网桥子网也会变）。
+> 容器虽已配置 `restart: unless-stopped` 会自动拉起，但 `EXT_SIP_IP` 是**容器创建时**注入的，
+> 所以**每次 WSL 重启后必须执行 `./dev-up.sh`** 重新注入（脚本探测 IP 并持久化到 `.env`）。
+
+> ⚠️ **STUN 地雷（v0.4 已修复 DEV 侧）**：镜像自带的 `external-ipv6.xml` / `internal-ipv6.xml`
+> 我们完全不用，但它们的 `ext-*-ip` 依赖 `$${external_rtp_ip}` / `$${external_sip_ip}`，
+> 而这两个变量要靠 STUN 探测。STUN 一旦超时，这两个 profile 建不起来，
+> 会**连带整个 `mod_sofia` 加载失败 → SIP 全挂**。现象很有迷惑性：FS 显示 `is ready`，
+> 但 `module_exists mod_sofia = false`、`sofia status` 报 `-ERR Command not found`。
+> DEV 侧已由 entrypoint 在启动时把这两个文件改名为 `*.xml.disabled`。
+> 生产侧同样存在此风险（目前靠 STUN 可用侥幸未触发），建议把 `vars.xml` 的 `stun-set`
+> 改成固定公网 IP 的 `set`，或同样禁用这两个 IPv6 profile。
+
+---
+
 ## 计费模型
 
 - **收入侧费率链**：话机.rate → 接入点.rate → 账户.rate；任一级 `NULL` 或 `<=0` 视为未配置，继续回落下一级。
@@ -212,6 +248,26 @@ pytest
 - 管理端 T-301 鉴权：白名单放行 FS 内部回调/健康检查/登录登出/静态资源/管理页外壳，
   其余 `/api/*` 需有效会话 Cookie。
 - 传输层建议 nginx 443 反代 `127.0.0.1:8000` 并收口公网 8000。
+
+---
+
+## 版本记录
+
+### v0.4（2026-09-08）— DEV 栈稳定性与对外地址正确性
+
+- **WSL 重启自恢复**：compose 四个服务加 `restart: unless-stopped`；`dev-up.sh` 改为
+  先全栈拉起、再 `--force-recreate freeswitch` 注入新 IP。
+- **修复 `EXT_SIP_IP` 注入链路断裂**：compose 的 freeswitch `environment` 补上 `EXT_SIP_IP`
+  （此前 `dev-up.sh` 探测到的 IP 根本传不进容器），entrypoint 去掉陈旧的硬编码兜底，
+  `dev-up.sh` 把探测结果持久化到 `.env`。
+- **修复 STUN 超时导致 `mod_sofia` 整体加载失败**：禁用未使用的 `external-ipv6` / `internal-ipv6` profile。
+- **SIP profile 默认对公网放开**：移除 `apply-inbound-acl` / `trusted_peers`，访问控制下沉到
+  防火墙 + 网关侧接入点授权（ESL 控制面仍保留 `lan`）。
+- **ESL 稳定性**：看门狗改非阻塞 `recvEvent(1.0)`，空闲探活成功即重置计时，避免误重连丢事件。
+- **CDR**：`dest_ip` / `dest_port` 统一为最终落地网关；终态覆盖 `created_at`。
+
+### v0.3
+计费（收入侧 + 成本侧费率链、预付费扣费）与运营后台（T-301 鉴权）。
 
 ---
 
