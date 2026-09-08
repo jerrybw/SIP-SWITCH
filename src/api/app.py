@@ -31,6 +31,7 @@ from api.dialplan_xml import (
     build_allow_xml, build_deny_xml, build_empty_xml, build_outbound_xml, _LOCAL_EXT_RE
 )
 from esl_client import _resolve_caller_account, _check_balance_allowed
+from esl_client import pre_insert_cdr
 from route.service import select_outbound_gateway, resolve_access_point, resolve_access_points
 from esl_client import get_concurrency
 from api.directory_xml import fs_directory
@@ -186,7 +187,12 @@ def _phone_branch(db, caller, callee, context="default", phone=None):
     # _compute_billing 在 `if not ap_id` 处直接返回全空 → 话单不归属账户、不计费。
     # 现显式下发 cdr_account_id，_compute_billing 亦增加「无接入点时按话机解析账户」兜底。
     acct_id = getattr(phone, "account_id", None)
-    if re.match(_LOCAL_EXT_RE, callee):
+    # 内线互拨（Task14）：同租户话机 = 被叫前 4 位 == 主叫前 4 位 且总长 8 位纯数字。
+    # 替代原 _LOCAL_EXT_RE(1000-1019)——8 位话机号（租户号+序号）不匹配旧正则，
+    # 导致互拨也被当出局打去 trunk。
+    _same_t = (len(callee) == 8 and callee.isdigit()
+               and len(caller) >= 4 and callee[:4] == caller[:4])
+    if _same_t:
         return Response(content=build_allow_xml(callee, None, 60, caller_type="phone", context=context, account_id=acct_id), media_type="text/xml")
     c=select_outbound_gateway(db, callee, ap_id=None)
     if c is None:
@@ -209,7 +215,7 @@ def _phone_branch(db, caller, callee, context="default", phone=None):
         return Response(content=build_deny_xml("busy_limit_gw",sip_code="503"),media_type="text/xml")
     legs = _enrich_candidates(db, c, caller, callee)
     print("[phone-outbound]",legs[0]["caller_out"],"->",legs[0]["callee_out"],"gw",gw.name,flush=True)
-    return Response(content=build_outbound_xml(legs[0]["callee_out"],candidates=legs,gateway_id=legs[0]["gateway_id"],carrier_id=legs[0]["carrier_id"],bill_unit=60,access_point_id=None,record_enabled=1,caller=legs[0]["caller_out"],caller_type="phone", caller_mid=caller, callee_mid=callee, context=context, account_id=acct_id),media_type="text/xml")
+    return Response(content=build_outbound_xml(legs[0]["callee_out"],candidates=legs,gateway_id=legs[0]["gateway_id"],carrier_id=legs[0]["carrier_id"],bill_unit=60,access_point_id=None,record_enabled=1,caller=legs[0]["caller_out"],caller_type="phone", caller_mid=caller, callee_mid=callee, context=context, dst_ip=legs[0]["ip"], dst_port=legs[0]["port"], account_id=acct_id),media_type="text/xml")
 
 def _route_via_ap(db, ap, bill_unit, caller, callee, context="default"):
     """AP 确定后公共路由(方案A): ②c变换/③本地分机/④选落地/④b落地限制/④c变换/⑤并发预检/下发。default 与 trunk 共用。"""
@@ -322,6 +328,15 @@ async def fs_dialplan(request: Request, db: Session = Depends(get_db)):
     # T-205 故障切换重入键：transfer 到 gw_leg_* 触发新 xml_curl 请求，按 uuid 返回缓存文档
     uuid = (params.get("Chat-Unique-ID") or params.get("Hunt-Unique-ID")
             or params.get("variable_uuid") or "")
+
+    # Task13/A 方案：INVITE 必经 xml_curl → 先预落一条 CDR（uuid 幂等 upsert）。
+    # ESL 事件流即使半死，话单也已留痕（end_time 留空待 HANGUP 或 reaper 补）。
+    if uuid:
+        try:
+            pre_insert_cdr(uuid, caller_in=caller, callee_in=callee,
+                           source_ip=network_addr)
+        except Exception as _e:
+            print("[pre-cdr] fail %s -> %s: %s" % (caller, callee, _e), flush=True)
 
     # 故障切换重入：dest 为 gw_leg_* 且命中缓存 → 原样返回首呼多腿文档，跳过规则重算
     if uuid and re.match(r"^gw_leg", callee) and uuid in _FAILOVER_CACHE:

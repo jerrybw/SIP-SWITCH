@@ -41,7 +41,7 @@ const SECTIONS = {
     ],
     fields: [
       { k: 'name', label: '名称', type: 'text', required: true },
-      { k: 'carrier_id', label: '运营商', type: 'select-src', src: '/api/carriers/options', optk: 'id', optt: 'name', def: 1 },
+      { k: 'carrier_id', label: '运营商', type: 'select-src', src: '/api/carriers/options', optk: 'id', optt: 'name', required: true, hint: '须先在「运营商」模块创建运营商；默认选中第一个可用运营商' },
       { k: 'ip', label: 'IP', type: 'text', required: true, hostSingle: true,
         hint: '出局目标地址：IPv4 / IPv6 / 域名，不含端口（端口填下方「端口」）' },
       { k: 'port', label: '端口', type: 'number', def: 5060 },
@@ -539,7 +539,14 @@ async function openForm(key, id) {
   body.innerHTML = '';
   for (const f of sec.fields) {
     const opts = (f.type === 'select-src') ? await loadOptions(f) : (f.options || []);
-    const val = (data[f.k] !== undefined && data[f.k] !== null) ? data[f.k] : (f.def !== undefined ? f.def : '');
+    // select-src 默认值：优先数据值 → 显式 def → options 首项（真实存在的 id）。
+    // 硬编码 def（如 def:1）会指向已删除的行 → 外键 1452 → 400；动态取首项可根治。
+    let val = (data[f.k] !== undefined && data[f.k] !== null) ? data[f.k]
+      : (f.def !== undefined ? f.def : ((f.type === 'select-src' && opts.length) ? opts[0].v : ''));
+    // select-src 无可用选项时（如尚未创建运营商），提示用户先建基础数据，避免保存后才发现 400
+    if (f.type === 'select-src' && !opts.length && !f.ro) {
+      console.warn('[admin] select-src 无可用选项: ' + f.k + ' src=' + f.src);
+    }
     const wrap = document.createElement('div');
     wrap.className = 'field';
     let control = '';
@@ -1009,9 +1016,7 @@ function renderBilling(key, st) {
   html += '<div class="cdr-filter">' +
     '<select id="bf_dim" class="pager-input">' +
       '<option value="account">按账户</option>' +
-      '<option value="business">按业务</option>' +
       '<option value="access_point">按接入点</option>' +
-      '<option value="customer">按客户</option>' +
       '<option value="gateway">按落地网关</option>' +
       '<option value="carrier">按运营商</option>' +
     '</select>' +

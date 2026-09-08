@@ -7,6 +7,9 @@ T-202 新增 build_outbound_xml（section description="sip-gateway-outbound"，�
 """
 
 
+import re
+
+
 def _act(app: str, data: str) -> str:
     # 必须输出合法的自闭合标签 "<action .../>"，否则 FS 无法解析动作。
     return f'<action application="{app}" data="{data}"/>'
@@ -60,7 +63,7 @@ def build_allow_xml(callee: str, access_point_id=None, bill_unit=60, caller_type
         "  <section name=\"dialplan\" description=\"sip-gateway\">",
         "    <context name=\"%s\">" % context,
         "      <extension name=\"gw_local_extension\">",
-        "        <condition field=\"destination_number\" expression=\"" + _LOCAL_EXT_RE + "\">",
+        "        <condition field=\"destination_number\" expression=\"^(" + re.escape(callee) + ")$\">",
         "          " + _act('set', 'dialed_extension=$1'),
         "          " + _act('set', 'ringback=' + ringback),
         "          " + _act('set', 'transfer_ringback=' + transfer_ringback),
@@ -122,8 +125,34 @@ _SIP_TO_FAIL_CAUSE = {
 }
 
 
+# 基础设施级失败：与运维填写的 SIP 码无关，任何一腿出现这类 hangup_cause 都**必须**
+# 切下一腿，否则 failover 链会断在半路（典型故障：gw-carrier-b 未在 FS 侧 provision，
+# bridge sofia/gateway/<name> 直接 INVALID_GATEWAY，而该 cause 不在运维填的 SIP 码里）。
+# 说明：continue_on_fail 认的是 Q.850 hangup_cause 名，故此处以 cause 名而非 SIP 码给出。
+_ALWAYS_SWITCH_CAUSES = (
+    "INVALID_GATEWAY",              # 网关未配置/未 provision，sofa 无法建出局通道
+    "DESTINATION_OUT_OF_ORDER",     # 对端不可达
+    "NETWORK_OUT_OF_ORDER",         # 网络层故障
+    "NO_ROUTE_DESTINATION",         # 无可用路由
+    "RECOVERY_ON_TIMER_EXPIRE",     # 超时无响应
+    "NORMAL_TEMPORARY_FAILURE",     # 临时故障（500）
+    "UNALLOCATED_NUMBER",           # 空号（404）
+    # —— 对端无响应/超时：出局 INVITE 发出后石沉大海（对端不可达、防火墙丢包）时，
+    #    FS 以 NO_ANSWER/PROGRESS_TIMEOUT 结束而非 5xx，漏配会导致整条 failover 链不切换
+    #    （2026-09-08 实测：gw-carrier-b 111.8.135.14 不可达 → NO_ANSWER → switch_count=0）。
+    "NO_ANSWER",                    # 无任何响应，超时挂断
+    "PROGRESS_TIMEOUT",             # 有 18x 但久不应答
+    "NO_USER_RESPONSE",             # 480 用户无响应
+    "SERVICE_UNAVAILABLE",          # 对端服务不可用
+)
+
+
 def _sip_codes_to_continue_on_fail(raw):
-    """把运维填写的 SIP 码列表转成 FS continue_on_fail 字符串（逗号分隔 hangup_cause 名）。"""
+    """把运维填写的 SIP 码列表转成 FS continue_on_fail 字符串（逗号分隔 hangup_cause 名）。
+
+    除运维填写的码外，**恒定追加** _ALWAYS_SWITCH_CAUSES——这些是基础设施级失败，
+    漏配会直接导致 failover 链断链（见 _ALWAYS_SWITCH_CAUSES 注释）。
+    """
     out = []
     for tok in (raw or "").split(","):
         tok = tok.strip()
@@ -133,6 +162,9 @@ def _sip_codes_to_continue_on_fail(raw):
             out.append(_SIP_TO_FAIL_CAUSE.get(tok, "NETWORK_OUT_OF_ORDER"))
         else:
             out.append(tok)
+    for c in _ALWAYS_SWITCH_CAUSES:
+        if c not in out:
+            out.append(c)
     return ",".join(out)
 
 

@@ -7,6 +7,7 @@ set -e
 
 FS_CONF_DIR="${FS_CONF_DIR:-/etc/freeswitch}"
 GATEWAY_URL="${GATEWAY_URL:-http://gateway:8000}"
+EXT_SIP_IP="${EXT_SIP_IP:-WSL_IP_REDACTED}"   # 宿主机可达的 WSL eth0 IP，dev-up.sh 每次自动探测注入
 ESL_PASSWORD="${ESL_PASSWORD:-ClueCon}"
 RTP_START="${RTP_START:-20000}"
 RTP_END="${RTP_END:-20100}"
@@ -30,6 +31,12 @@ done
 if [ -f /fs-config/sip_profiles/external.xml ]; then
   cp /fs-config/sip_profiles/external.xml "$FS_CONF_DIR/sip_profiles/external.xml"
   echo "[entrypoint] installed sip_profiles/external.xml"
+fi
+
+if [ -f /fs-config/sip_profiles/internal.xml ]; then
+  sed -e "s|__EXT_SIP_IP__|${EXT_SIP_IP}|g" \
+      /fs-config/sip_profiles/internal.xml > "$FS_CONF_DIR/sip_profiles/internal.xml"
+  echo "[entrypoint] rendered sip_profiles/internal.xml (ext-ip=${EXT_SIP_IP})"
 fi
 
 # 2) 注入 RTP 端口范围

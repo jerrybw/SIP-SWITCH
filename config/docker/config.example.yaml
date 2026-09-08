@@ -27,7 +27,7 @@ mysql:
   url: mysql+pymysql://sip_switch:change-me@mysql:3306/sip_switch?charset=utf8mb4
   pool_recycle: 3600
 
-prepaid_enabled: false          # true=预付费（余额不足 603 拒呼 + 挂断后扣费）；false=纯监控不计费
+prepaid_enabled: true          # true=预付费（余额不足 603 拒呼 + 挂断后扣费）；false=纯监控不计费
 
 auth:
   admin_user: admin

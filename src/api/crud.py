@@ -21,11 +21,19 @@ from sqlalchemy.orm import Session
 from db.session import get_db
 import logging
 log=logging.getLogger("crud")
+provision = None
+remove_xml = None
 try:
     from src.fs_provision import provision, remove_xml
-except Exception:
-    provision=None
-    remove_xml=None
+except ImportError:
+    # 入口为 `python src/main.py` 时 sys.path 只有 /app/src，src 包不可见
+    try:
+        from fs_provision import provision, remove_xml
+    except Exception as _e:
+        # 不能静默：否则落地网关保存后永不自动下发到 FS，故障极难发现
+        log.warning("fs_provision 不可用，落地网关将不会自动下发到 FS: %s", _e)
+except Exception as _e:
+    log.warning("fs_provision 不可用，落地网关将不会自动下发到 FS: %s", _e)
 from db.models import (
     AccessPoint, Gateway, PrefixRoute, Rule, AccessGatewayPolicy, Carrier, Business,
     SipPhone, SystemSetting, Account, Customer,

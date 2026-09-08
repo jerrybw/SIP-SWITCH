@@ -27,7 +27,9 @@ class Account(Base):
     """
     __tablename__ = "account"
     id = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    customer_id = mapped_column(BigInteger, ForeignKey("customer.id"), nullable=False)
+    # customer 为历史遗留维度：业务上已不使用（customer 表为空），允许 NULL。
+    # 2026-09-07 由 nullable=False 放开，否则 POST /api/accounts 不传 customer_id 会撞 1048。
+    customer_id = mapped_column(BigInteger, ForeignKey("customer.id"), nullable=True)
     name = mapped_column(String(128), nullable=False)
     balance = mapped_column(Numeric(14, 4), default=0.0)
     currency = mapped_column(String(8), default="CNY")

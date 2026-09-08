@@ -82,6 +82,21 @@ services:
     networks:
       - sipnet
 
+  sipp-stub:
+    # dev 端 SIP 落地桩，模拟 carrier trunk 应答 OPTIONS/INVITE。完全无外网依赖。
+    # gw-carrier-a (id=9) 的 gateway 容器 ip 指向 'sipp-stub' 服务名 DNS，
+    # 出局/呼叫/挂断/CDR/billing 全链路即可跑通（FS 经 external profile 出局，
+    # provision 写 gateway XML 指向 sipp-stub:5060 让 FS bridge 经 sofia/gateway/<gw_name>
+    # 走桩）。验证 PSTN 类流程前先把生产真 trunk 切回。
+    image: sip-switch-sipp-stub:latest
+    build:
+      context: ./deploy/sipp-stub
+    ports:
+      - "15060:5060/udp"
+      - "15060:5060/tcp"
+    networks:
+      - sipnet
+
 volumes:
   mysql-data:
   fs-profiles:

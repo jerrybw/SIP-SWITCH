@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!--
+  sipp-stub 极简 server scenario：仅用裸 <recv>/<send><![CDATA[...]]></send>，不嵌 <action>。
+  - OPTIONS 直接 200 OK（CSeq/Max-Forwards 等不去留，sipgate 只要 pong 即可）
+  - INVITE -> 180/200 + SDP -> 等 BYE -> 200 OK
+  - 不处理 ACK（FS 默认不发 ACK 给 UAS，但 sofia 可能在 BYE 前先 ACK，按 optional 跳过）
+
+  sipp v3 注意：
+  * <send> 体内必须是 <![CDATA[...]]>，且**不能嵌 <action>**
+  * 没有被识别的动作时只 warn 不 abort，所以只要第一行匹配关键字就进
+-->
+<scenario name="stub">
+
+  <!-- 选项 A：OPTIONS 直接 200（独立分支，反复可触发） -->
+  <recv request="OPTIONS" crlf="true" />
+  <send>
+    <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- 选项 B：主路径 INVITE -->
+  <recv request="INVITE" crlf="true" />
+  <send>
+    <![CDATA[
+SIP/2.0 100 Trying
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+  <send>
+    <![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+  <send>
+    <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=stub-1
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=- 1 1 IN IP4 [local_ip]
+s=stub
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0 8 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+]]>
+  </send>
+  <recv request="ACK" crlf="true" optional="true" />
+  <recv request="BYE" crlf="true" />
+  <send>
+    <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

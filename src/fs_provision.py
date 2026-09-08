@@ -1,5 +1,8 @@
 import os, logging, threading
-from fs_esl_cmd import fs_api
+try:  # 以 /app/src 为根运行（python src/main.py，sys.path[0]=/app/src）
+    from fs_esl_cmd import fs_api
+except ImportError:  # 以 /app 为根运行（src 作为包被导入，sys.path 无 /app/src）
+    from src.fs_esl_cmd import fs_api
 log = logging.getLogger("fs_provision")
 
 # 落地网关 XML 落盘目录（一期方案 A：网关与 FS 共享该卷）。

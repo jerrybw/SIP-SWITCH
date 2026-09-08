@@ -18,7 +18,7 @@ from datetime import datetime
 from math import ceil
 from decimal import Decimal
 
-from ESL import ESLconnection
+from fs_esl_socket import ESLConnection as ESLconnection
 
 from core.config import settings
 from db.session import SessionLocal
@@ -456,7 +456,8 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         callee_mid=rec.get("callee_mid"),
         caller_out=rec.get("caller_out"),
         callee_out=rec.get("callee_out"),
-        start_time=rec.get("start_time"),
+        # 事件未携带 start_time 时复用预落库的时间（NULL 会让唯一键失效→重复行）
+        start_time=_existing_start_time(call_uuid) or rec.get("start_time") or end_time,
         ring_time=rec.get("ring_time"),
         answer_time=rec.get("answer_time"),
         end_time=end_time,
@@ -535,6 +536,15 @@ class ESLClient:
         self._stop.set()
 
     def _run(self):
+        # 事件订阅串（inbound ESL 连接订阅后 FS 才投递；订阅失败/丢失需重连重订）。
+        EVENT_SUB = (
+            "CHANNEL_CREATE CHANNEL_PROGRESS CHANNEL_PROGRESS_MEDIA "
+            "CHANNEL_ANSWER CHANNEL_BRIDGE CHANNEL_HANGUP_COMPLETE "
+            "CUSTOM sofia::register sofia::expire"
+        )
+        # 自愈参数：周期重订阅间隔 / 无事件看门狗阈值（秒）。
+        RESUB_INTERVAL = 60
+        WATCHDOG = 120
         while not self._stop.is_set():
             try:
                 con = ESLconnection(ESL_CFG["host"], ESL_CFG["port"], ESL_CFG["password"])
@@ -543,20 +553,38 @@ class ESLClient:
                     time_sleep(ESL_CFG.get("reconnect_interval", 3))
                     continue
                 print("[ESL] connected")
-                con.events(
-                    "plain",
-                    "CHANNEL_CREATE CHANNEL_PROGRESS CHANNEL_PROGRESS_MEDIA "
-                    "CHANNEL_ANSWER CHANNEL_BRIDGE CHANNEL_HANGUP_COMPLETE "
-                    "CUSTOM sofia::register sofia::expire",
-                )
+                if not con.events("plain", EVENT_SUB):
+                    # 订阅静默失败（FS 事件套接字尚未就绪等）：断开重连后重订。
+                    print("[ESL] subscribe failed, reconnect")
+                    con.disconnect()
+                    time_sleep(ESL_CFG.get("reconnect_interval", 3))
+                    continue
+                print("[ESL] subscribed")
+                last_sub = time.monotonic()
+                last_event = time.monotonic()
                 while not self._stop.is_set():
-                    ev = con.recvEvent()
+                    # 看门狗：长时间无事件 = 连接僵死/订阅丢失 → 强制重连重订。
+                    if time.monotonic() - last_event > WATCHDOG:
+                        print("[ESL] no events for %ss, reconnecting" % WATCHDOG)
+                        break
+                    ev = con.recvEvent(1.0)
                     if ev is None:
-                        break  # 断线，重连
+                        # 非阻塞轮询：超时（连接存活但暂无事件）不要重连，
+                        # 靠顶部看门狗与 60s 周期重订阅自愈；仅连接确已断开才重连。
+                        if not con.connected():
+                            print("[ESL] connection lost, reconnecting")
+                            break
+                        continue
+                    last_event = time.monotonic()
                     try:
                         handle_event(ev)
                     except Exception as e:  # noqa: BLE001
                         print("[ESL] handle error:", e)
+                    # 周期重订阅：keepalive + 自愈可能丢失的订阅（不依赖整条连接重连）。
+                    now = time.monotonic()
+                    if now - last_sub > RESUB_INTERVAL:
+                        con.events("plain", EVENT_SUB)
+                        last_sub = now
                 con.disconnect()
             except Exception as e:  # noqa: BLE001
                 print("[ESL] loop error:", e)
@@ -572,11 +600,83 @@ def _persist_cdr(cdr, attempts=3):
     return _upsert_cdr_dict(vals, attempts)
 
 
-def _upsert_cdr_dict(vals: dict, attempts=3):
+def _existing_start_time(call_uuid):
+    """取该 uuid 已落行的 start_time（跳过 NULL），供预落库/终态复用。
+
+    背景：cdr 是分区表，唯一键只能是 (uuid, start_time)。而 MySQL 对**含 NULL 的唯一键
+    不判冲突**，且每次落库若写一个新的 start_time 同样绕过冲突——两者叠加导致同一 uuid
+    被插入多行（故障切换每腿重入 + 终态各一行）。复用首次 start_time 之后，复合唯一键
+    才能真正命中并走 ON DUPLICATE KEY UPDATE，实现「一个 uuid 一行」。
+    """
+    if not call_uuid:
+        return None
+    try:
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(Cdr.start_time)
+                .where(Cdr.uuid == call_uuid, Cdr.start_time.isnot(None))
+                .order_by(Cdr.id)
+                .limit(1)
+            ).first()
+            return row[0] if row else None
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def pre_insert_cdr(call_uuid, caller_in="", callee_in="", account_id=None,
+                    gateway_id=None, carrier_id=None, source_ip=None,
+                    source_port=None, reject_reason="", caller_type="phone"):
+    """dialplan 出口预落库（Task13/A 方案）：只要有 INVITE 进来就落一条 CDR。
+
+    在 gateway 返回 dialplan XML 的同时写入（xml_curl 是 INVITE 必经之路），
+    不依赖 ESL 事件流——ESL 半死时呼叫仍留痕。后续 HANGUP 事件用同一 uuid
+    upsert 补终态（_upsert_cdr_dict ON DUPLICATE KEY UPDATE，幂等不双插）。
+
+    注意：本函数只落「进行中/决策」半成品；成本/计费/终态字段由 HANGUP 路径
+    _save_cdr 补齐。若 ESL 一直没事件，该记录 end_time 为空 = 未完成呼叫，
+    由管理端按 start_time 展示为失败/未接通。
+
+    重入安全：T-205 故障切换链 gw_leg_0..N-1 每腿都触发同 uuid 的 xml_curl，本函数
+    走 ignore_existing=True（等同 INSERT IGNORE），绝不覆盖 HANGUP 已落的 hangup_cause /
+    sip_code / start_time 等终态字段；也不双插。
+    """
+    try:
+        from datetime import datetime as _dt
+        import time as _t
+        vals = {
+            "uuid": call_uuid,
+            "caller_in": caller_in or "",
+            "callee_in": callee_in or "",
+            # 复用首次 start_time：否则故障切换每腿重入都会因 start_time 不同而插新行
+            "start_time": _existing_start_time(call_uuid) or _dt.utcnow(),
+            "account_id": account_id,
+            "gateway_id": gateway_id,
+            "carrier_id": carrier_id,
+            "source_ip": source_ip,
+            "source_port": source_port,
+            "reject_reason": reject_reason or None,
+            "caller_type": caller_type or "phone",
+            "hangup_cause": None,
+            "sip_code": None,
+        }
+        # ignore_existing=True：dialplan 重入（同 uuid）时即使 HANGUP 已落也绝不覆盖终态。
+        return _upsert_cdr_dict(vals, ignore_existing=True)
+    except Exception as e:
+        print("[CDR] pre_insert failed (uuid=%s): %s" % (call_uuid, e), flush=True)
+        return False
+
+
+def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False):
     """T-208/T-计费：MySQL upsert（ON DUPLICATE KEY UPDATE）。
 
     重复事件 / reaper 重灌均幂等：冲突时按 uuid 更新（排除 id/uuid/created_at，保留原始创建时间），
     cost 随 CDR 一起算好，重灌不会重算也不会双计。
+
+    ignore_existing=True 时用于「预落库」场景：uuid 已存在就什么都不做（保护已落 HANGUP 终态不被
+    覆盖）；不存在就插入。语义等同 INSERT IGNORE 但不吞 IntegrityError，仍会 retry。
     """
     cols = [c.name for c in Cdr.__table__.columns]
     # NOT NULL 列兜底：DB 已标 NOT NULL DEFAULT 的列若 vals 显式传 None 会触发 IntegrityError(1048)
@@ -592,11 +692,24 @@ def _upsert_cdr_dict(vals: dict, attempts=3):
     for _k, _d in _nn_defaults.items():
         if vals.get(_k) is None:
             vals[_k] = _d
+    # 统一收口（所有落库路径：_save_cdr / pre_insert_cdr / spool 重灌 都汇聚于此）：
+    # 对齐到该 uuid 已落行的 start_time。cdr 是分区表，唯一键 (uuid, start_time) 在
+    # start_time 取不同值（事件时间 vs utcnow）或为 NULL 时均不判冲突，导致同一通话落多行。
+    if vals.get("uuid"):
+        _st = _existing_start_time(vals["uuid"])
+        if _st is not None:
+            vals["start_time"] = _st
+        elif vals.get("start_time") is None:
+            vals["start_time"] = datetime.utcnow()
     for i in range(attempts):
         db = SessionLocal()
         try:
             stmt = mysql_insert(Cdr).values(**vals)
-            upd = {c: stmt.inserted[c] for c in cols if c not in ("id", "uuid", "created_at")}
+            if ignore_existing:
+                # 预落库场景：UUID 已存在时不更新任何列（保护 HANGUP 路径落下的终态）。
+                upd = {"id": Cdr.id}
+            else:
+                upd = {c: stmt.inserted[c] for c in cols if c not in ("id", "uuid", "created_at")}
             stmt = stmt.on_duplicate_key_update(**upd)
             db.execute(stmt)
             db.commit()

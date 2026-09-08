@@ -75,17 +75,16 @@ async def create_account(request: Request, db=Depends(get_db)):
         rate = Decimal(str(rate))
     except (InvalidOperation, ValueError, TypeError):
         raise HTTPException(status_code=400, detail="费率(rate)非法")
-    # customer_id：Account 必有上层 Customer，保留可选；不传/空/字符串"null" 则归到首个 Customer
+    # customer_id：历史遗留维度，业务上不使用（customer 表为空）。
+    # 2026-09-07 起完全忽略：不传即写 NULL，不再要求 Customer 存在、不再自动归拢。
     cid = data.get("customer_id")
     if cid in (None, "", "null"):
-        cid = db.scalar(select(func.min(Customer.id)))
-    if cid is None:
-        raise HTTPException(status_code=400, detail="无可用 Customer，无法创建账户")
+        cid = None
     # status 前端 select 未选时 collectForm 会置 null（非缺省 1），int(None) 会 TypeError→500，须兜底
     _status = data.get("status")
     status = int(_status) if _status not in (None, "") else 1
     acct = Account(
-        customer_id=int(cid),
+        customer_id=(int(cid) if cid not in (None, "", "null") else None),
         name=name,
         rate=rate,
         account_number=_next_account_number(db),

@@ -35,7 +35,7 @@ def esl_api(cmd, timeout=10):
 
     con = None
     try:
-        from ESL import ESLconnection
+        from fs_esl_socket import ESLConnection as ESLconnection
     except Exception as e:  # 容器镜像内未安装 python-esl 绑定
         log.warning("ESL binding unavailable: %s", e)
         return None
