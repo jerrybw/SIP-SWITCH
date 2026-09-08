@@ -314,6 +314,11 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
         head_sets = [
             "          " + _act('set', 'cdr_gateway_id=%s' % gid),
             "          " + _act('set', 'cdr_carrier_id=%s' % carrier),
+            # 落地 IP/端口与 cdr_gateway_id **同腿下发**（逐腿覆盖）：保证故障切换后
+            # CDR 的 dest_ip/dest_port 反映最终胜出的落地网关，而不是首选候选
+            # （2026-09-08；此前只在 gw_outbound_pre 里按首选网关写一次）。
+            "          " + _act('set', 'cdr_dst_ip=%s' % (c.get("ip") or "")),
+            "          " + _act('set', 'cdr_dst_port=%s' % (c.get("port") or "")),
             "          " + _act('set', 'cdr_callee_out=%s' % callee_out),
             "          " + _act('set', 'cdr_caller_out=%s' % caller_out),
             "          " + _act('set', 'effective_caller_id_number=%s' % caller_out),
@@ -437,10 +442,9 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
     pre_ext += cdr_common
     if caller_type is not None:
         pre_ext.append("          " + _act('set', 'cdr_caller_type=%s' % caller_type))
-    if dst_ip is not None:
-        pre_ext.append("          " + _act('set', 'cdr_dst_ip=%s' % dst_ip))
-    if dst_port is not None:
-        pre_ext.append("          " + _act('set', 'cdr_dst_port=%s' % dst_port))
+    # ⚠️ cdr_dst_ip/cdr_dst_port **不在此处下发**：pre_ext 只跑一次（首呼），若在此写死
+    # 首选网关地址，故障切换后 CDR 的 dest_ip/dest_port 会停留在首选网关，与最终胜出的
+    # gateway_id 口径不一致（2026-09-08 修复）。改由 _leg_ext 逐腿与 cdr_gateway_id 同批下发。
     pre_ext += [
         "          " + _act('set', 'cdr_bill_unit=%s' % bill_unit),
         "          " + _act('set', 'gw_failover_detail='),

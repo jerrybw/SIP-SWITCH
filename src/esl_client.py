@@ -395,6 +395,37 @@ def _hangup_direction(rec: dict, event) -> int:
     return 2          # 出局后被叫异常信令 / 被叫拆线
 
 
+
+def _resolve_dest_endpoint(gateway_id, dest_ip, dest_port):
+    """以最终胜出的 gateway_id 为准校正落地 IP/端口（2026-09-08）。
+
+    dialplan 已逐腿下发 cdr_dst_ip/cdr_dst_port（与 cdr_gateway_id 同腿覆盖），
+    但历史上（或 B 腿事件变量缺失时）dest_ip 可能停留在首选网关 / 为 None。
+    落库前按最终 gateway_id 回查 gateway 表再校正一次，保证
+    **gateway_id 与 dest_ip/dest_port 永远指向同一个落地网关**。
+    gateway 行缺失或 ip/port 为空时回退到事件携带值。
+    """
+    if not gateway_id:
+        return dest_ip, dest_port
+    db = None
+    try:
+        db = SessionLocal()
+        gw = db.get(Gateway, gateway_id)
+        if gw is not None:
+            if getattr(gw, "ip", None):
+                dest_ip = gw.ip
+            if getattr(gw, "port", None):
+                dest_port = gw.port
+    except Exception as e:
+        print("[cdr] resolve dest endpoint failed (gw=%s): %s" % (gateway_id, e))
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+    return dest_ip, dest_port
+
 def _save_cdr(call_uuid: str, rec: dict, event) -> None:
     # 结束时间以主(A)腿自身 HANGUP 事件时间戳为准（B 腿已不回填，见 handle_event），
     # 仅当事件时间戳缺失时才回退 rec 里可能残留的 end_time。
@@ -448,6 +479,12 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         else (rec.get("switch_count") or 0)
     )
 
+    # 落地 IP/端口与最终胜出网关对齐（故障切换后 gateway_id 是切换后的值，
+    # dest_ip 必须同步跟随，口径见 _resolve_dest_endpoint）。
+    dest_ip, dest_port = _resolve_dest_endpoint(
+        rec.get("gateway_id"), rec.get("dest_ip"), rec.get("dest_port")
+    )
+
     cdr = Cdr(
         uuid=call_uuid,
         caller_in=rec.get("caller_in") or "",
@@ -472,8 +509,8 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         business_id=business_id,
         source_ip=rec.get("source_ip"),
         source_port=rec.get("source_port"),
-        dest_ip=rec.get("dest_ip"),
-        dest_port=rec.get("dest_port"),
+        dest_ip=dest_ip,
+        dest_port=dest_port,
         # caller_type 列 NOT NULL DEFAULT ''；rec 中该字段可能未下发(为 None)，
         # 显式传 None 会触发 IntegrityError 且 DB 默认不生效，故兜底为空串。
         caller_type=rec.get("caller_type") or "",
