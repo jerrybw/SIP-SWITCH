@@ -5,6 +5,7 @@ import re
 from fastapi import Request, Response
 from sqlalchemy import select
 from db.models import SipPhone, AccessPoint
+from core.config import settings
 log = logging.getLogger("directory_xml")
 FS_DIR = "/usr/local/freeswitch/etc/freeswitch/directory"
 
@@ -73,12 +74,34 @@ def _doc(domain, users_xml):
 _sip_call_ctx = {}
 
 
+_default_domain_warned = False
+
+
+def _default_domain():
+    """FS 未携带 domain/key_value 时的兜底域。
+
+    取值：config_settings.yaml 的 default_sip_domain。
+    未配置则返回空串（并只在首次告警一次），绝不回退任何硬编码地址——
+    历史版本这里写死过生产私网 IP，导致该地址污染了 FS 的 profile 别名。
+    """
+    global _default_domain_warned
+    v = (settings.get("default_sip_domain") or "").strip()
+    if not v and not _default_domain_warned:
+        _default_domain_warned = True
+        log.warning(
+            "[directory] default_sip_domain 未配置，且 FS 请求未携带 domain，目录域将为空"
+        )
+    return v
+
+
 def fs_directory(params, db):
     print("DIRQ", dict(params), flush=True)
     qp = params
     ru = (qp.get("user") or qp.get("sip_auth_username")
           or qp.get("sip_from_user"))
-    domain = qp.get("domain") or qp.get("key_value") or "LIGHTHOUSE_PRIVATE_IP_REDACTED"
+    # 兜底域：FS 的目录请求多数带 domain/key_value，但 purpose=gateways 一类请求
+    # 两者皆空。此处不再硬编码任何环境 IP，改为：请求参数 -> 配置 default_sip_domain。
+    domain = qp.get("domain") or qp.get("key_value") or _default_domain()
     # 2026-09-03：只对「管理启用」的话机出目录（enabled=1）；停用话机目录不可见 →
     # FS 拒绝其注册/呼入。注册型接入点同样按 status=1 过滤。
     rows = db.scalars(select(SipPhone).where(SipPhone.enabled == 1)).all()

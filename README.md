@@ -268,6 +268,9 @@ pytest
 - **全新部署自愈**：新增启动期全量 `provision` 落地网关 XML（`src/gw_bootstrap.py`），`docker compose down -v` 后无需人工去管理端保存网关；
   同时补齐 `account.customer_id` 可空迁移并同步 `deploy/mysql/init/01-schema.sql`（此前该列可空仅存在于 dev 现库，未回流到 schema 与迁移）。
 
+- **目录兜底域配置化**：`/fs/directory` 的兜底 domain 改从配置 `default_sip_domain` 读取，
+  不再硬编码生产私网 IP（该硬编码会在 FS 里生成一个来源不明的 profile 别名）。
+
 ### v0.3
 计费（收入侧 + 成本侧费率链、预付费扣费）与运营后台（T-301 鉴权）。
 

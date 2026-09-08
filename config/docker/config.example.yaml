@@ -27,6 +27,10 @@ mysql:
   url: mysql+pymysql://sip_switch:change-me@mysql:3306/sip_switch?charset=utf8mb4
   pool_recycle: 3600
 
+# FS 目录请求未携带 domain 时的兜底域（多数请求会带，仅防呆）。
+# 留空则回退空串并在日志告警一次；请勿填写生产内网地址以外的环境 IP。
+default_sip_domain: <sip-domain>
+
 prepaid_enabled: true          # true=预付费（余额不足 603 拒呼 + 挂断后扣费）；false=纯监控不计费
 
 auth:
