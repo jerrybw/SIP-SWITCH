@@ -1,5 +1,5 @@
 #!/bin/sh
-# DEV 一键起（WSL 重启后执行）：探测本机 eth0 IP -> 注入 EXT_SIP_IP -> 重建 FS 容器
+# DEV 一键起（WSL 重启后执行）：探测本机 eth0 IP -> 注入 EXT_SIP_IP -> 全栈拉起并重建 FS
 # 用法: cd /root/src/SIP-SWITCH && ./dev-up.sh
 set -e
 
@@ -11,11 +11,16 @@ if [ -z "$IP" ]; then
 fi
 echo "[dev-up] WSL eth0 IP = $IP"
 
-# 2) 注入环境变量并重建 FS 容器（entrypoint 会把 __EXT_SIP_IP__ 渲染成 $IP）
+# 2) 注入环境变量
 export EXT_SIP_IP="$IP"
+
+# 3) 全栈拉起：mysql/gateway/sipp-stub 若未运行则启动；FS 按新 env 重建
+docker compose --env-file .env up -d
+
+# 4) 强制重建 FS，确保使用最新 EXT_SIP_IP（即使其他服务未变）
 docker compose --env-file .env up -d --force-recreate freeswitch
 
-# 3) 提示
+# 5) 提示
 echo ""
 echo "[dev-up] 完成。FS NAT 对外地址已更新为 $IP"
 echo "[dev-up] 软电话/浏览器请使用:"
