@@ -67,7 +67,7 @@ def build_allow_xml(callee: str, access_point_id=None, bill_unit=60, caller_type
         "          " + _act('set', 'dialed_extension=$1'),
         "          " + _act('set', 'ringback=' + ringback),
         "          " + _act('set', 'transfer_ringback=' + transfer_ringback),
-        "          " + _act('set', 'call_timeout=30'),
+        "          " + _act('set', 'call_timeout=10'),
         "          " + _act('set', rec),
         "          " + _act('record_session', rec_session_data),
     ]
@@ -257,7 +257,7 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
         head = [
             "      <extension name=\"gw_outbound_route\">",
             "        <condition field=\"destination_number\" expression=\"^(.*)$\">",
-            "          " + _act('set', 'call_timeout=30'),
+            "          " + _act('set', 'call_timeout=10'),
             "          " + _act('set', 'sip-force-contact=NDLB-connectile-dysfunction'),
         ]
         cdr = list(cdr_common)
@@ -436,7 +436,7 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
     pre_ext = [
         "      <extension name=\"gw_outbound_pre\">",
         "        <condition field=\"destination_number\" expression=\"^(.*)$\">",
-        "          " + _act('set', 'call_timeout=30'),
+        "          " + _act('set', 'call_timeout=10'),
         "          " + _act('set', 'sip-force-contact=NDLB-connectile-dysfunction'),
     ]
     pre_ext += cdr_common
