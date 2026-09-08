@@ -1,0 +1,44 @@
+<configuration name="acl.conf" description="Network Lists">
+  <network-lists>
+    <!--
+	 These ACL's are automatically created on startup.
+
+	 rfc1918.auto  - RFC1918 Space
+	 nat.auto      - RFC1918 Excluding your local lan.
+	 localnet.auto - ACL for your local lan.
+	 loopback.auto - ACL for your local lan.
+    -->
+
+    <!-- trunk(external, 5080) 入局对等体白名单。
+         external.xml 的 <param name="apply-inbound-acl" value="trusted_peers"/> 指向本 list；
+         原镜像的 acl.conf.xml **没有定义 trusted_peers**，ACL 缺失即默认拒绝 → 所有经 5080
+         入局的 INVITE 直接 403 Forbidden（连通道都不建，网关侧看不到任何 xml_curl 请求）。
+         dev：放行 docker 私有网段——宿主经 docker 端口映射入局时，FS 看到的源 IP 是
+         compose 网桥网关（172.22.0.1），不是宿主自己的 WSL_IP_REDACTED。
+         生产：改成真实 trunk 对端 IP/网段，禁止放 0.0.0.0/0。 -->
+    <list name="trusted_peers" default="deny">
+      <node type="allow" cidr="172.16.0.0/12"/>
+      <node type="allow" cidr="10.0.0.0/8"/>
+      <node type="allow" cidr="127.0.0.1/32"/>
+    </list>
+
+    <list name="lan" default="allow">
+      <node type="deny" cidr="192.168.42.0/24"/>
+      <node type="allow" cidr="192.168.42.42/32"/>
+    </list>
+
+    <!--
+	This will traverse the directory adding all users
+	with the cidr= tag to this ACL, when this ACL matches
+	the users variables and params apply as if they
+	digest authenticated.
+    -->
+    <list name="domains" default="deny">
+      <!-- domain= is special it scans the domain from the directory to build the ACL -->
+      <node type="allow" domain="$${domain}"/>
+      <!-- use cidr= if you wish to allow ip ranges to this domains acl. -->
+      <!-- <node type="allow" cidr="192.168.0.0/24"/> -->
+    </list>
+
+  </network-lists>
+</configuration>
