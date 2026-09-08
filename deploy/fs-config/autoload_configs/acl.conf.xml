@@ -1,6 +1,13 @@
 <configuration name="acl.conf" description="Network Lists">
   <network-lists>
     <!--
+      [设计决策 2026-09-08] SIP profile(internal 5060 / external 5080) 默认对公网放开，
+      FS 层不再做来源 IP 白名单。访问控制下沉到两层：
+        1) 服务器安全策略(防火墙/安全组) 在网络边缘按端口放行真实对端；
+        2) 网关侧 _access_point 按来源 IP 做业务级授权(未命中即 603 no_access_point)。
+      trusted_peers / lan 等 FS 层 ACL 仅保留给 ESL(event_socket) 控制面使用。
+    -->
+    <!--
 	 These ACL's are automatically created on startup.
 
 	 rfc1918.auto  - RFC1918 Space
@@ -9,18 +16,6 @@
 	 loopback.auto - ACL for your local lan.
     -->
 
-    <!-- trunk(external, 5080) 入局对等体白名单。
-         external.xml 的 <param name="apply-inbound-acl" value="trusted_peers"/> 指向本 list；
-         原镜像的 acl.conf.xml **没有定义 trusted_peers**，ACL 缺失即默认拒绝 → 所有经 5080
-         入局的 INVITE 直接 403 Forbidden（连通道都不建，网关侧看不到任何 xml_curl 请求）。
-         dev：放行 docker 私有网段——宿主经 docker 端口映射入局时，FS 看到的源 IP 是
-         compose 网桥网关（172.22.0.1），不是宿主自己的 WSL_IP_REDACTED。
-         生产：改成真实 trunk 对端 IP/网段，禁止放 0.0.0.0/0。 -->
-    <list name="trusted_peers" default="deny">
-      <node type="allow" cidr="172.16.0.0/12"/>
-      <node type="allow" cidr="10.0.0.0/8"/>
-      <node type="allow" cidr="127.0.0.1/32"/>
-    </list>
 
     <list name="lan" default="allow">
       <node type="deny" cidr="192.168.42.0/24"/>

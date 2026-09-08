@@ -125,12 +125,11 @@
     -->
     <!--<param name="enable-timer" value="false"/>-->
     <!--<param name="minimum-session-expires" value="120"/>-->
-    <param name="apply-inbound-acl" value="lan"/>
     <!--
         This defines your local network, by default we detect your local network
         and create this localnet.auto ACL for this.
     -->
-    <param name="local-network-acl" value="dev_no_localnet"/>
+    <param name="local-network-acl" value="localnet.auto"/>
     <!--<param name="apply-register-acl" value="domains"/>-->
     <!--<param name="dtmf-type" value="info"/>-->
 
