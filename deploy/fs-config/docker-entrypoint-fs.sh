@@ -38,8 +38,9 @@ done
 # 注意：FS 仅在进程启动时展开该 include glob；新增/修改网关文件后需重启 FS 进程，
 #       reloadxml / sofia profile external rescan|restart 均不会发现新文件。
 if [ -f /fs-config/sip_profiles/external.xml ]; then
-  cp /fs-config/sip_profiles/external.xml "$FS_CONF_DIR/sip_profiles/external.xml"
-  echo "[entrypoint] installed sip_profiles/external.xml"
+  sed -e "s|__EXT_SIP_IP__|${EXT_SIP_IP}|g" \
+      /fs-config/sip_profiles/external.xml > "$FS_CONF_DIR/sip_profiles/external.xml"
+  echo "[entrypoint] rendered sip_profiles/external.xml (ext-ip=${EXT_SIP_IP})"
 fi
 
 if [ -f /fs-config/sip_profiles/internal.xml ]; then

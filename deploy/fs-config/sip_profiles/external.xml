@@ -37,8 +37,8 @@
     <param name="inbound-late-negotiation" value="true"/>
     <param name="rtp-ip" value="$${local_ip_v4}"/>
     <param name="sip-ip" value="$${local_ip_v4}"/>
-    <param name="ext-rtp-ip" value="$${external_rtp_ip}"/>
-    <param name="ext-sip-ip" value="$${external_sip_ip}"/>
+    <param name="ext-rtp-ip" value="__EXT_SIP_IP__"/>
+    <param name="ext-sip-ip" value="__EXT_SIP_IP__"/>
     <param name="rtp-timeout-sec" value="300"/>
     <param name="rtp-hold-timeout-sec" value="1800"/>
     <param name="tls" value="$${external_ssl_enable}"/>
