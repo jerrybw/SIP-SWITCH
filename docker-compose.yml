@@ -41,6 +41,7 @@ services:
         FS_REF: ${FS_REF:-v1.11.2}
         JOBS: ${FS_JOBS:-8}
     environment:
+      EXT_SIP_IP: ${EXT_SIP_IP:-}
       ESL_PASSWORD: ${ESL_PASSWORD}
       GATEWAY_URL: http://gateway:8000
       RTP_START: ${RTP_START:-20000}

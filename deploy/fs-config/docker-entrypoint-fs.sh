@@ -7,7 +7,12 @@ set -e
 
 FS_CONF_DIR="${FS_CONF_DIR:-/etc/freeswitch}"
 GATEWAY_URL="${GATEWAY_URL:-http://gateway:8000}"
-EXT_SIP_IP="${EXT_SIP_IP:-WSL_IP_REDACTED}"   # 宿主机可达的 WSL eth0 IP，dev-up.sh 每次自动探测注入
+EXT_SIP_IP="${EXT_SIP_IP:-}"
+if [ -z "${EXT_SIP_IP}" ]; then
+  echo "[entrypoint] WARN: EXT_SIP_IP 未注入，ext-sip-ip 回退为容器内网地址" >&2
+  echo "[entrypoint] WARN: WSL 重启/IP 变更后请执行 ./dev-up.sh 重新注入" >&2
+  EXT_SIP_IP='$${local_ip_v4}'
+fi
 ESL_PASSWORD="${ESL_PASSWORD:-ClueCon}"
 RTP_START="${RTP_START:-20000}"
 RTP_END="${RTP_END:-20100}"
@@ -37,6 +42,18 @@ if [ -f /fs-config/sip_profiles/internal.xml ]; then
   sed -e "s|__EXT_SIP_IP__|${EXT_SIP_IP}|g" \
       /fs-config/sip_profiles/internal.xml > "$FS_CONF_DIR/sip_profiles/internal.xml"
   echo "[entrypoint] rendered sip_profiles/internal.xml (ext-ip=${EXT_SIP_IP})"
+
+# 禁用镜像自带的 IPv6 profile（我们只用 internal:5060 / external:5080 两个 IPv4 profile）。
+# 原因：其 ext-rtp-ip / ext-sip-ip 取 $${external_rtp_ip} / $${external_sip_ip}，
+# 而这两个变量由 vars.xml 的 stun-set 从 stun.freeswitch.org 探测；STUN 超时即为空，
+# 导致 profile 创建失败并连带 mod_sofia 整体加载失败 —— SIP 全挂。
+for prof in external-ipv6 internal-ipv6; do
+  if [ -f "${FS_CONF_DIR}/sip_profiles/${prof}.xml" ]; then
+    mv "${FS_CONF_DIR}/sip_profiles/${prof}.xml" "${FS_CONF_DIR}/sip_profiles/${prof}.xml.disabled"
+    echo "[entrypoint] disabled unused STUN-dependent profile ${prof}"
+  fi
+done
+
 fi
 
 # 2) 注入 RTP 端口范围

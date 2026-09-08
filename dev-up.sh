@@ -14,6 +14,15 @@ echo "[dev-up] WSL eth0 IP = $IP"
 # 2) 注入环境变量
 export EXT_SIP_IP="$IP"
 
+# 2b) 持久化到 .env，使后续任意 docker compose 命令都能取到正确 IP
+if [ -f .env ]; then
+  if grep -q '^EXT_SIP_IP=' .env; then
+    sed -i "s|^EXT_SIP_IP=.*|EXT_SIP_IP=$IP|" .env
+  else
+    printf '\n# 由 dev-up.sh 自动探测注入（WSL 重启后 IP 会变）\nEXT_SIP_IP=%s\n' "$IP" >> .env
+  fi
+fi
+
 # 3) 全栈拉起：mysql/gateway/sipp-stub 若未运行则启动；FS 按新 env 重建
 docker compose --env-file .env up -d
 
