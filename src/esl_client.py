@@ -537,6 +537,8 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         # 导致 _persist_cdr 全列构造 vals 时把 None 写进 INSERT（DEFAULT 仅在列被省略时生效）。
         billed=0,
         fs_node_uuid=ESL_CFG.get("fs_node_uuid"),
+        # 终态覆盖 created_at：以落终态的当前时间写入（用户预期；不再沿用阶段①的呼叫起始时间，
+        # 否则 created_at 会早于挂断时间）。upsert 的 ON DUPLICATE KEY UPDATE 已放开 created_at 列。
         created_at=datetime.utcnow(),
     )
 
@@ -611,6 +613,7 @@ class ESLClient:
                         if not con.connected():
                             print("[ESL] connection lost, reconnecting")
                             break
+                        last_event = time.monotonic()
                         continue
                     last_event = time.monotonic()
                     try:
@@ -662,7 +665,6 @@ def _existing_start_time(call_uuid):
     except Exception:
         return None
 
-
 def pre_insert_cdr(call_uuid, caller_in="", callee_in="", account_id=None,
                     gateway_id=None, carrier_id=None, source_ip=None,
                     source_port=None, reject_reason="", caller_type="phone"):
@@ -709,7 +711,7 @@ def pre_insert_cdr(call_uuid, caller_in="", callee_in="", account_id=None,
 def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False):
     """T-208/T-计费：MySQL upsert（ON DUPLICATE KEY UPDATE）。
 
-    重复事件 / reaper 重灌均幂等：冲突时按 uuid 更新（排除 id/uuid/created_at，保留原始创建时间），
+    重复事件 / reaper 重灌均幂等：冲突时按 uuid 更新（排除 id/uuid；created_at 由终态覆盖写入），
     cost 随 CDR 一起算好，重灌不会重算也不会双计。
 
     ignore_existing=True 时用于「预落库」场景：uuid 已存在就什么都不做（保护已落 HANGUP 终态不被
@@ -746,7 +748,7 @@ def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False):
                 # 预落库场景：UUID 已存在时不更新任何列（保护 HANGUP 路径落下的终态）。
                 upd = {"id": Cdr.id}
             else:
-                upd = {c: stmt.inserted[c] for c in cols if c not in ("id", "uuid", "created_at")}
+                upd = {c: stmt.inserted[c] for c in cols if c not in ("id", "uuid")}
             stmt = stmt.on_duplicate_key_update(**upd)
             db.execute(stmt)
             db.commit()
