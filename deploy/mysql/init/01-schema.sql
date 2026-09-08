@@ -60,7 +60,9 @@ CREATE TABLE `access_whitelist` (
 
 CREATE TABLE `account` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `customer_id` bigint unsigned NOT NULL,
+  -- 历史维度 customer，业务已不使用（现以 account_number 为租户标识），可空；
+  -- 与 db/migrate.py:ensure_account_customer_id_nullable 保持一致
+  `customer_id` bigint unsigned DEFAULT NULL,
   `name` varchar(128) NOT NULL,
   `balance` decimal(14,4) NOT NULL DEFAULT '0.0000' COMMENT '账户余额，二期启用',
   `currency` varchar(8) NOT NULL DEFAULT 'CNY',

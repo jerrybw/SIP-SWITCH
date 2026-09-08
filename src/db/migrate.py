@@ -722,3 +722,31 @@ def ensure_endpoint_host_columns(engine) -> None:
         conn.commit()
         print("[migrate] access_point.register_host %s -> 512" % cur_len)
 
+
+def ensure_account_customer_id_nullable(engine) -> None:
+    """2026-09-08：account.customer_id 改为可空。
+
+    历史维度 customer 业务已不使用（现以 account_number 为租户标识），
+    dev 曾手工把该列改为 NULLABLE，但既未回流 01-schema.sql 也无迁移，
+    导致「删数据卷全新部署」后该列变回 NOT NULL，建账户会失败。
+    这里幂等补齐：已可空则直接返回。外键 fk_account_customer 保持不变
+    （NULL 不受外键约束）。
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    check_sql = (
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND table_name = 'account' "
+        "AND column_name = 'customer_id'"
+    )
+    with engine.connect() as conn:
+        row = conn.execute(text(check_sql)).scalar()
+        if row is None:
+            return  # 列不存在，交给其它迁移处理
+        if str(row).upper() == "YES":
+            return
+        conn.execute(text(
+            "ALTER TABLE account MODIFY COLUMN customer_id BIGINT UNSIGNED DEFAULT NULL"
+        ))
+        conn.commit()
+        print("[migrate] account.customer_id -> NULLABLE")

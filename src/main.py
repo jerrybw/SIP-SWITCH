@@ -16,6 +16,7 @@ from core.config import settings
 from esl_client import ESLClient, start_cdr_reaper
 from heartbeat import HeartbeatProber
 from phone_sync import start_phone_sync
+from gw_bootstrap import start_gateway_provision
 from api.app import app
 
 
@@ -26,5 +27,6 @@ if __name__ == '__main__':
     prober = HeartbeatProber(interval=30)
     prober.start()
     start_phone_sync()
+    start_gateway_provision()  # 全新部署时重建落地网关 XML（卷被清空的兜底）
     api_cfg = settings['api']
     uvicorn.run(app, host=api_cfg.get('host', '0.0.0.0'), port=api_cfg.get('port', 8080))
