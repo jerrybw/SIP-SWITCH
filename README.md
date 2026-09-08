@@ -178,7 +178,7 @@ make -j"$(nproc)" && make install      # 默认装到 /usr/local/freeswitch
   </include>
   ```
   > ⚠️ 部署约束：`fs_provision` 是**直接写 FS 配置目录 + 调用本机 `fs_cli`**，因此网关服务必须与 FS 部署在**同一台主机**（或网关主机能访问 FS 配置目录且 `fs_cli` 可达）。当前项目即同机部署。
-  > ⚠️ 首次部署若数据库里**已有**落地网关记录（如恢复备份 / 演示数据），这些记录不会在启动时自动下发——需到管理端对每个网关「编辑→保存」触发一次 `provision()`（或手动调用 `fs_provision.provision(gw)`）。之后增删改均自动。
+  > ✅ 落地网关 XML 由 `src/gw_bootstrap.py` 在**网关进程启动时**按 DB 全量重建（纯本地写文件，不依赖 FS 就绪），并在 ESL 连上后自动 `sofia profile external rescan`。因此即使共享卷被清空（如 `docker compose down -v` 全新部署）也无需人工干预。只写不删，卷内镜像自带的 `example.xml` 等非网关 XML 不受影响。
 
 ---
 
@@ -194,12 +194,12 @@ FreeSWITCH 需要在 SIP 的 Contact / Via 与 SDP `c=` 行里**通告一个对�
 | | DEV（WSL + docker compose） | 生产（Lighthouse 原生部署） |
 |---|---|---|
 | 部署方式 | `docker compose up -d`（mysql / freeswitch / gateway / sipp-stub） | FS 原生安装（systemd `freeswitch.service`）+ 网关 venv（`sip-gateway.service`） |
-| FS 真实 IP | 容器内网 `172.18.0.2`（局域网不可达） | 私网 `LIGHTHOUSE_PRIVATE_IP_REDACTED`（公网不可达） |
+| FS 真实 IP | 容器内网 `172.18.0.2`（局域网不可达） | 私网 IP（如 `10.x.x.x`，公网不可达） |
 | 对外地址来源 | 环境变量 `EXT_SIP_IP`，由 `dev-up.sh` 每次探测 WSL eth0 IP 注入 | `vars.xml` 的 `stun-set` 向 `stun.freeswitch.org` 探测，写入 `$${external_sip_ip}` |
-| 生效值示例 | `WSL_IP_REDACTED` | `LIGHTHOUSE_PUBLIC_IP_REDACTED` |
+| 生效值示例 | WSL 宿主 IP（如 `172.22.x.x`） | 云主机公网 IP |
 | 关联配置 | `deploy/fs-config/sip_profiles/internal.xml`（占位符 `__EXT_SIP_IP__`，由 entrypoint 渲染） | `sip_profiles/internal.xml` 与 `external.xml` 直接引用 `$${external_sip_ip}` |
 
-> ⚠️ **WSL 重启后 IP 会漂移**（实测 `WSL_IP_REDACTED` → `WSL_IP_REDACTED`，docker 网桥子网也会变）。
+> ⚠️ **WSL 重启后 IP 会漂移**（实测 `172.22.x.x` → `172.22.y.y`，docker 网桥子网也会变）。
 > 容器虽已配置 `restart: unless-stopped` 会自动拉起，但 `EXT_SIP_IP` 是**容器创建时**注入的，
 > 所以**每次 WSL 重启后必须执行 `./dev-up.sh`** 重新注入（脚本探测 IP 并持久化到 `.env`）。
 
@@ -265,6 +265,8 @@ pytest
   防火墙 + 网关侧接入点授权（ESL 控制面仍保留 `lan`）。
 - **ESL 稳定性**：看门狗改非阻塞 `recvEvent(1.0)`，空闲探活成功即重置计时，避免误重连丢事件。
 - **CDR**：`dest_ip` / `dest_port` 统一为最终落地网关；终态覆盖 `created_at`。
+- **全新部署自愈**：新增启动期全量 `provision` 落地网关 XML（`src/gw_bootstrap.py`），`docker compose down -v` 后无需人工去管理端保存网关；
+  同时补齐 `account.customer_id` 可空迁移并同步 `deploy/mysql/init/01-schema.sql`（此前该列可空仅存在于 dev 现库，未回流到 schema 与迁移）。
 
 ### v0.3
 计费（收入侧 + 成本侧费率链、预付费扣费）与运营后台（T-301 鉴权）。
