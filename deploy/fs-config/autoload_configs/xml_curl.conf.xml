@@ -9,5 +9,11 @@
       <param name="gateway-url" value="__GATEWAY_URL__/fs/directory" bindings="directory"/>
       <param name="cacheable" value="false"/>
     </binding>
+    <!-- 机制 A：落地网关不落盘。FS 加载 sofia.conf 时向网关应用请求，按 DB gateway 表动态下发。
+         cacheable=false 使 FS 每次 rescan 都重新拉取（新增/变更网关后 rescan 即生效）。 -->
+    <binding name="configuration">
+      <param name="gateway-url" value="__GATEWAY_URL__/fs/config" bindings="configuration"/>
+      <param name="cacheable" value="false"/>
+    </binding>
   </bindings>
 </configuration>

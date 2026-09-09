@@ -81,7 +81,23 @@
 | P2-3 | 防欺诈 | ❌ | 无实现 |
 | P2-4 | 报表 | ⚠️ | ✅ `/billing/summary` + `/billing/export` + `carrier_ledger`；缺完整利润分析视图 |
 
-## 6. 工程 P2（并发可靠性）与时序铁律
+## 6. 落地网关不落盘（机制 A）— ✅ 完成
+
+> 地基性改造：在 P2（并发可靠性）与生产重部署之前完成，使多 FS 节点拆分零成本。
+
+- **机制**：FS 通过 mod_xml_curl 的 configuration 绑定，加载 sofia 配置时向网关应用请求 section=configuration&key_value=sofia.conf；网关应用按 gateway 表（单一事实来源）动态生成含 <gateways> 的完整 sofia.conf，FS 侧零落盘。新增 FS 节点只需把 xml_curl 指向同一网关端点，底层无需改动。
+- **其余配置**（acl/event_socket/modules 等）回空文档，FS 按 mod_xml_curl 标准回退行为使用磁盘文件，保持原行为不变。
+- **代码证据**：
+  - src/fs_sofia_config.py（新增）：build_sofia_conf(db) 按 DB 生成 sofia.conf；build_config_response(key_value, db) 仅对 sofia.conf 动态下发。
+  - src/api/app.py：新增 GET/POST /fs/config 端点；鉴权白名单加入 /fs/config。
+  - deploy/fs-config/autoload_configs/xml_curl.conf.xml：新增 <binding name=configuration> 指向 /fs/config，cacheable=false。
+  - src/fs_provision.py / src/gw_bootstrap.py：移除写盘逻辑，仅保留 sofia profile external rescan 触发（FS 重新拉取即生效）。
+  - deploy/fs-config/sip_profiles/external.xml：<gateways> 置空（不再 include 磁盘网关 XML）。
+  - docker-compose.yml：gateway 服务增加 EXT_SIP_IP / FS_CONFIG_RO 环境变量与 ./deploy/fs-config:/fs-config-ro:ro 只读挂载。
+- **dev 验证（2026-09-09）**：清空 FS 磁盘网关 XML 后重启 FS，sofia status 仍显示 external::gw-carrier-a 指向 sipp-stub:5060（NOREG）；经该动态网关 originate 出局到 sipp-stub 成功（call ACTIVE、UAS 应答）；FS 日志无 Unable to find 回退；CDR 正常写入。证明零落盘 + 出局可达。
+- **遗留**：fs-profiles 命名卷现为空挂（无网关 XML 写入），保留挂载无害，可日后清理。
+
+## 7. 工程 P2（并发可靠性）与时序铁律
 
 | 编号 | 内容 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
@@ -102,7 +118,7 @@
 
 **当前真实生效的选路因子**：① `status==1` ② **心跳状态**（离线直接剔除候选池，`route/service.py:100`）③ 前缀最长→priority→id ④ 接入点↔落地 allow/deny 策略
 
-## 7. 集群高可用 / M4 容量验证 / P3 / P4
+## 8. 集群高可用 / M4 容量验证 / P3 / P4
 
 | 编号 | 任务 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
@@ -116,7 +132,7 @@
 
 ---
 
-## 8. ⚠️ 已知陷阱（判断进度前必读）
+## 9. ⚠️ 已知陷阱（判断进度前必读）
 
 1. **"建表未实现"陷阱**：`fs_node`、`operation_log`、`sys_user.role` 三处**表/字段已建但无业务逻辑**，只看表会误判为"已完成"。判断时必须查"有没有代码用它"。
 2. **计划文档滞后**：tdrive《任务拆解与测试计划 V1.0》是 2026-08-27 快照，M2/M3 全标未开始，实际已完成。**勿以该文档判断进度。**
@@ -125,7 +141,7 @@
 
 ---
 
-## 9. 待拍板
+## 10. 待拍板
 
 | # | 问题 | 阻塞什么 |
 |---|---|---|
@@ -137,7 +153,7 @@
 
 ---
 
-## 10. 回填纪律（防再次漂移）
+## 11. 回填纪律（防再次漂移）
 
 **"完成"的定义 = 以下四件事一次做完，缺一不算完成：**
 
@@ -152,7 +168,7 @@
 
 ---
 
-## 11. 关联文档（"为什么"类，在项目资产 tdrive）
+## 12. 关联文档（"为什么"类，在项目资产 tdrive）
 
 | 文档 | 用途 |
 |---|---|

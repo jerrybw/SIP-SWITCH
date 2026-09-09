@@ -1,11 +1,6 @@
 <profile name="external">
-  <!-- Docker 化适配：落地网关 XML 由 Python 网关写入共享卷 /fs-profiles（网关侧），
-       FS 容器把该卷挂到 sip_profiles/external（external profile 自身目录），
-       本 profile 用相对 include external/*.xml 读取（与 vanilla example.xml 同一机制，已验证可用）。
-       早期试过绝对路径 glob、及 sip_profiles/external/gateways 子目录 glob，FS 均不展开，故改回此方式。 -->
-  <gateways>
-    <X-PRE-PROCESS cmd="include" data="external/*.xml"/>
-  </gateways>
+  <!-- 机制 A：落地网关不落盘，由网关应用经 mod_xml_curl configuration 段动态下发（见 /fs/config）。本 profile 不再 include 磁盘网关 XML。 -->
+  <gateways></gateways>
 
   <aliases>
   </aliases>

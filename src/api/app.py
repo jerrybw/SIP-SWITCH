@@ -35,6 +35,7 @@ from esl_client import pre_insert_cdr
 from route.service import select_outbound_gateway, resolve_access_point, resolve_access_points
 from esl_client import get_concurrency
 from api.directory_xml import fs_directory
+from fs_sofia_config import build_config_response
 
 app = FastAPI(title="SIP Switch Gateway API", version="0.2.0")
 
@@ -69,7 +70,7 @@ async def _auth_guard(request, call_next):
     # /admin 仅承载登录页与前端 JS，不含任何数据；真正的数据经 /api/* 受保护，
     # 由前端 bootAuth() 探 /api/me(401) 后在客户端渲染登录覆盖层。
     path = request.url.path
-    if (path in ("/fs/dialplan", "/fs/directory", "/healthz", "/api/login", "/api/logout")
+    if (path in ("/fs/dialplan", "/fs/directory", "/fs/config", "/healthz", "/api/login", "/api/logout")
             or path.startswith("/static/") or path == "/" or path == "/admin"):
         return await call_next(request)
     try:
@@ -472,3 +473,31 @@ def admin_page(request: Request):
 @app.get("/")
 def root():
     return RedirectResponse(url="/admin")
+
+
+@app.api_route("/fs/config", methods=["GET", "POST"])
+async def fs_config_api(request: Request, db: Session = Depends(get_db)):
+    """mod_xml_curl 配置服务（机制 A：落地网关不落盘）。
+
+    FS 加载 sofia.conf 时请求本端点，按 DB gateway 表动态返回含 <gateways> 的 sofia.conf；
+    其余配置（acl/event_socket/modules 等）回空文档，FS 回退磁盘默认。
+    """
+    # mod_xml_curl 不同段/方法参数位置不一致：configuration 段多为 POST+query，
+    # dialplan/directory 多为 POST+form。合并两种来源，避免 key_value 解析失败回退磁盘。
+    if request.method == "POST":
+        try:
+            _form = await request.form()
+        except Exception:
+            _form = {}
+    else:
+        _form = {}
+    _q = request.query_params
+    key_value = (_form.get("key_value") or _q.get("key_value")
+                 or _form.get("name") or _q.get("name") or "")
+    print("[fs_config] method=%s key_value=%s" % (request.method, key_value), flush=True)
+    try:
+        content = build_config_response(key_value, db)
+    except Exception as e:
+        print("[fs_config] error: %s" % e, flush=True)
+        content = '<document type="freeswitch/xml"></document>'
+    return Response(content=content, media_type="text/xml")

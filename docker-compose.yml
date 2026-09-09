@@ -74,10 +74,14 @@ services:
     environment:
       GATEWAY_CONFIG: /app/config/config_settings.yaml
       FS_SIP_PROFILES_EXTERNAL: /fs-profiles
+      EXT_SIP_IP: ${EXT_SIP_IP:-}
+      FS_CONFIG_RO: /fs-config-ro
     volumes:
       # 首次运行前：cp config/docker/config.example.yaml config/docker/config_settings.yaml
       - ./config/docker:/app/config:ro
       - fs-profiles:/fs-profiles
+      # 机制 A：只读挂载 FS 配置，供网关应用动态生成 sofia.conf（网关不落盘）
+      - ./deploy/fs-config:/fs-config-ro:ro
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
