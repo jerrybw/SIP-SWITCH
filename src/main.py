@@ -18,6 +18,7 @@ from heartbeat import HeartbeatProber
 from phone_sync import start_phone_sync
 from gw_bootstrap import start_gateway_provision
 from api.app import app
+from core.redis_client import startup_self_check
 
 
 if __name__ == '__main__':
@@ -28,5 +29,6 @@ if __name__ == '__main__':
     prober.start()
     start_phone_sync()
     start_gateway_provision()  # 全新部署时重建落地网关 XML（卷被清空的兜底）
+    startup_self_check()  # Phase1-1: Redis 接入自检（当前不阻断启动，P2-a 接入后改 D3 fail-close）
     api_cfg = settings['api']
     uvicorn.run(app, host=api_cfg.get('host', '0.0.0.0'), port=api_cfg.get('port', 8080))

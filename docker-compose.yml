@@ -102,8 +102,24 @@ services:
     networks:
       - sipnet
 
+  redis:
+    restart: unless-stopped
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - sipnet
+
 volumes:
   mysql-data:
+  redis-data:
 
 networks:
   sipnet:

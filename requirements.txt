@@ -16,3 +16,6 @@ httpx==0.28.1                     # 测试用：fastapi TestClient（tests/test_
 # 因此此处不钉版本。首次部署请执行 `pip install python-esl` 后补钉具体版本。
 # python-esl  —— 不在 PyPI。请从 FreeSWITCH 源码安装其 Python 绑定（位于 libs/esl/，make 后 `pip install ./libs/esl`），
 # 或在已装 FS 的机器上 `pip install python-esl`（FS 提供的包）。详见 README §4.2。
+
+# Phase1 基础设施（DEP-2 强制）：当前仅做连接/连通性自检，未参与业务决策
+redis==5.2.1
