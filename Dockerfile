@@ -20,8 +20,5 @@ RUN pip install --no-cache-dir -i "${PIP_INDEX_URL}" -r requirements.txt
 COPY src/ ./src/
 COPY conftest.py pytest.ini ./
 
-# 落地网关 XML 写入共享卷（一期方案 A）；由环境变量指定路径
-ENV FS_SIP_PROFILES_EXTERNAL=/fs-profiles
-
 EXPOSE 8000
 CMD ["python", "src/main.py"]

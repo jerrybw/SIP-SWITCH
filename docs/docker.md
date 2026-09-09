@@ -60,7 +60,9 @@ docker compose logs -f gateway
 
 1. 打开 <http://localhost:8000>，用 `config_settings.yaml` 里的 `admin_user` 登录
 2. 依次建：**运营商 → 客户 → 账户 → 接入点 / 落地网关 → 话机**
-3. 落地网关保存后，网关会把 XML 写进共享卷 `fs-profiles`，并经 **ESL** 通知 FS `rescan`
+3. 落地网关保存后，FS 经 mod_xml_curl 的 configuration 绑定向网关 `/fs/config` 重新拉取
+   `sofia.conf`（**机制 A：不落盘**，网关定义以 DB 的 `gateway` 表为唯一事实来源）；
+   网关仅需经 **ESL** 通知 FS `rescan` 触发重拉，不写任何 XML 文件
 
 ## 4. 验收自查
 
@@ -68,7 +70,8 @@ docker compose logs -f gateway
 - [ ] 空库建出 18 张表：`docker compose exec mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "use sip_switch; show tables;"`
 - [ ] 管理端可登录、建数据成功
 - [ ] 改落地网关后 FS 生效：
-      `docker compose exec gateway sh -c 'ls /fs-profiles'`（应有 `<网关名>.xml`）
+      `docker compose exec freeswitch fs_cli -H 127.0.0.1 -P 8021 -p "$ESL_PASSWORD" -x 'sofia status'`
+      （应见 `external::<网关名>` 指向对应落地地址）
 - [ ] ESL 可用：`docker compose logs gateway | grep -i "rescan\|ESL"`（无 `ESL connect failed`）
 
 ## 5. 排错
