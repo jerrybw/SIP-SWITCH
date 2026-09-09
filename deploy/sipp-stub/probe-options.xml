@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!--
+  sipp 探测场景（UAC）：只发一个 OPTIONS，用来验证对端是否应答存活探测。
+  用法（在 sipp 所在的容器里执行）：
+    sipp -sf /opt/sipp/probe-options.xml -i 127.0.0.1 -p 5070 -m 1 -nostdin <dst_ip>:<dst_port>
+  看统计屏里 "200 <----------" 是否为 1；为 0（Timeout=1）说明对端不答 OPTIONS。
+-->
+<scenario name="uac-options-probe">
+  <send>
+    <![CDATA[
+OPTIONS sip:stub@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+From: sipp <sip:sipp@[local_ip]>;tag=[call_number]
+To: stub <sip:stub@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 OPTIONS
+Contact: <sip:sipp@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+
+]]>
+  </send>
+  <recv response="200" timeout="6000" optional="true" />
+  <recv response="100" timeout="6000" optional="true" />
+</scenario>
