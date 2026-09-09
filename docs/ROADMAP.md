@@ -95,7 +95,17 @@
   - deploy/fs-config/sip_profiles/external.xml：<gateways> 置空（不再 include 磁盘网关 XML）。
   - docker-compose.yml：gateway 服务增加 EXT_SIP_IP / FS_CONFIG_RO 环境变量与 ./deploy/fs-config:/fs-config-ro:ro 只读挂载。
 - **dev 验证（2026-09-09）**：清空 FS 磁盘网关 XML 后重启 FS，sofia status 仍显示 external::gw-carrier-a 指向 sipp-stub:5060（NOREG）；经该动态网关 originate 出局到 sipp-stub 成功（call ACTIVE、UAS 应答）；FS 日志无 Unable to find 回退；CDR 正常写入。证明零落盘 + 出局可达。
-- **遗留**：fs-profiles 命名卷现为空挂（无网关 XML 写入），保留挂载无害，可日后清理。
+- **遗留清理已完成（2026-09-09）**：原 fs-profiles 共享卷已确认空挂（实测 0 文件）。
+  - 已从 `docker-compose.yml` 移除 4 处无用配置：freeswitch 的 `fs-profiles` 挂载（含过时注释）、
+    gateway 的 `FS_SIP_PROFILES_EXTERNAL=/fs-profiles` 环境变量、gateway 的 `fs-profiles:/fs-profiles` 挂载、卷定义。
+  - `sipp-stub` 段仍提"provision 写 gateway XML"与 `id=9` 的过时注释已同步修正为机制 A 描述。
+  - 空卷已 `docker volume rm sip-switch_fs-profiles`（删除前复核 0 文件）。
+  - **回归实测**：重建容器后 `gw-carrier-a` 仍由 xml_curl 下发（`sofia status` 可见），
+    经其 originate 到 sipp-stub 出局 1 路 ACTIVE，机制 A 完好。
+- **⚠️ 已知无关项（勿误判为回归）**：`sofia status` 中的 `external::example.com`（`sip:joeuser@example.com`）
+  来自镜像 `vars.xml` 的 `default_provider=example.com` + `directory/default/example.com.xml`，是 vanilla 桩网关。
+  **早于不落盘改造即存在**——共享卷只遮罩 `sip_profiles/external`，从不遮罩 `directory/`。
+  不影响业务：选路只走 DB 的 `prefix_route` → `gateway`，该桩永不入选。
 
 ## 7. 工程 P2（并发可靠性）与时序铁律
 
