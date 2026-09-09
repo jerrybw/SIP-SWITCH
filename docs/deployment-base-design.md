@@ -253,6 +253,8 @@ dev 现有 `gw-carrier-a`（`id=7`，`ip=sipp-stub`，`port=5060`）实测 **`au
 
 ### ✅ 结论：混合，各管一段（DEP-4 已确认）
 
+> **DEP-4 已落地**：仓库根 `deploy.sh` 即此混合方案的宿主机部署器——首次运行探测 IP + 生成密钥（mysql root/user、esl、redis、jwt、salt、admin 明文+哈希）+ 渲染 `.env` 与 `config/docker/config_settings.yaml`；检测到已有真实配置时仅刷新随 IP 变化的 `EXT_SIP_IP`/`default_sip_domain`，跳过密钥生成（密钥属「一次性生成+分发」，禁止副本各自生成，见 §4.1）；`--force` 可重生成全部密钥，`--up` 可顺带 `docker compose up -d`。Phase1 仅渲染单机形态，split/multi 为 Phase2。
+
 ```
 deploy.sh（宿主机，一次性）
   ├─ 探测 external.sip_ip
