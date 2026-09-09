@@ -206,6 +206,13 @@ dev 现有 `gw-carrier-a`（`id=7`，`ip=sipp-stub`，`port=5060`）实测 **`au
 落地网关、路由、费率、接入点、账户等**全在 DB**，天然热生效。
 ⚠️ 不要往配置文件里塞业务数据 —— 否则多副本/多节点立刻不一致。
 
+### 4.5 落地状态（TaskList #68 ✅）
+
+- 第2类统一实时访问层：`src/core/sys_setting.py`（`get_setting` / `get_int_setting`，读必查库，禁止 import 期缓存）。
+- 第1/3类边界：`src/core/config.py` 模块 docstring 标注；导出 `NODE_UUID` 供 #69 FS 节点健康检查复用。
+- `config.example.yaml` 增加 `node` / `record` 段；`deploy.sh` 生成并渲染 `__NODE_UUID__`（幂等：已有配置不重生成）。
+- 权威说明见 `docs/config-categories.md`。
+
 ---
 
 ## 5. 各可选项的接入要点

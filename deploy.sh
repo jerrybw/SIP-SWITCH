@@ -88,6 +88,7 @@ JWT_SECRET=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
 SALT=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
 ADMIN_PW=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9' | head -c 12)
 ADMIN_HASH=$(python3 -c "import hashlib,sys; print(hashlib.sha256(('$SALT'+'$ADMIN_PW').encode()).hexdigest())")
+NODE_UUID=$(python3 -c 'import secrets;print(secrets.token_hex(8))')
 
 # ---------- 3) 渲染 .env（从 .env.example） ----------
 echo "[deploy] 渲染 $ENV_LIVE ..."
@@ -111,9 +112,9 @@ PY
 
 # ---------- 4) 渲染 config_settings.yaml（从 config.example.yaml） ----------
 echo "[deploy] 渲染 $CFG_LIVE ..."
-python3 - "$CFG_EXAMPLE" "$CFG_LIVE" "$EXT_SIP_IP" "$MYSQL_PW" "$ESL_PW" "$REDIS_PW" "$JWT_SECRET" "$SALT" "$ADMIN_HASH" <<'PY'
+python3 - "$CFG_EXAMPLE" "$CFG_LIVE" "$EXT_SIP_IP" "$MYSQL_PW" "$ESL_PW" "$REDIS_PW" "$JWT_SECRET" "$SALT" "$ADMIN_HASH" "$NODE_UUID" <<'PY'
 import sys
-src, dst, ip, mp, esl, rp, jwt, salt, ah = sys.argv[1:10]
+src, dst, ip, mp, esl, rp, jwt, salt, ah, node = sys.argv[1:11]
 t = open(src).read()
 t = t.replace('change-me-esl', esl)          # 先替换更具体的
 t = t.replace('change-me', mp)               # mysql url 里的密码占位
@@ -122,6 +123,7 @@ t = t.replace('<random-salt>', salt)
 t = t.replace('<random-secret>', jwt)
 t = t.replace('<sha256-salt-password>', ah)
 t = t.replace('password: ""', 'password: %s' % rp)   # redis 密码（空=无认证，向后兼容）
+t = t.replace('__NODE_UUID__', node)                  # 节点唯一标识
 open(dst, 'w').write(t)
 PY
 

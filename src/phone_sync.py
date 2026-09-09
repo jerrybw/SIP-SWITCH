@@ -4,8 +4,9 @@ import time
 from datetime import datetime
 
 from fs_esl_cmd import fs_api
+from core.sys_setting import get_int_setting
 from db.session import SessionLocal
-from db.models import SipPhone, AccessPoint, SystemSetting
+from db.models import SipPhone, AccessPoint
 from sqlalchemy import select
 
 log = logging.getLogger("phone_sync")
@@ -18,13 +19,8 @@ def _fs_reg_text():
 
 
 def _setting(db, key, default):
-    try:
-        row = db.scalar(select(SystemSetting).where(SystemSetting.key == key))
-        if row is not None and row.value:
-            return max(5, int(float(row.value)))
-    except Exception:
-        pass
-    return default
+    # 第2类热加载：经 sys_setting 实时读库，不缓存（见 docs/config-categories.md）
+    return max(5, get_int_setting(key, default))
 
 def _reconcile_once():
     db = SessionLocal()

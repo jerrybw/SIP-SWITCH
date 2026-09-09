@@ -40,6 +40,16 @@ auth:
   jwt_secret: <random-secret>                  # secrets.token_hex(24)
   token_expire_minutes: 120
 
+# ---- 节点标识（第1类；多节点部署须唯一）----
+# 留空 = 自动回落主机名（单机/开发可用）；生产多节点须由 deploy.sh 生成唯一值。
+node:
+  uuid: __NODE_UUID__
+
+# ---- 录音（第1类；URI 抽象由 #70 实现）----
+record:
+  dir: /var/lib/freeswitch/recordings
+  backend: local            # local（默认）| s3（预留，未实现）
+
 # ---- Redis（Phase1 基础设施，DEP-2 强制）----
 # 省略 / 留空 = 使用 compose 服务名 redis:6379（容器 Redis，最常用）
 # 切换云 Redis：显式填写 host / port / password / db
