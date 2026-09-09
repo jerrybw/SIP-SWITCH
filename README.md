@@ -56,8 +56,9 @@
 
 ```
 sip-switch-gateway/
-├── config_settings.yaml      # 运行配置（含密钥，**已被 .gitignore 忽略，禁止提交**）
-├── config.example.yaml       # 配置模板（无真实值）
+├── config/                  # 配置目录
+│   ├── docker/config_settings.yaml   # 运行配置（含密钥，**已被 .gitignore 忽略，禁止提交**）
+│   └── docker/config.example.yaml    # 配置模板（无真实值）
 ├── requirements.txt          # 依赖（钉版本）
 ├── pytest.ini                # 测试配置（pythonpath=src）
 ├── src/
@@ -86,33 +87,53 @@ sip-switch-gateway/
 
 ## 快速开始
 
-### 1. 依赖
+本项目以 **Docker Compose 一键部署** 为主路径，FreeSWITCH / MySQL / 网关 / Redis 全部容器化。
+裸机 `python -m src.main` 仅用于本地单元测试 / 调试（见 §0.3），不构成本地完整系统。
+
+### 0.1 一键起（推荐）
 
 ```bash
-cd sip-switch-gateway
+git clone https://github.com/jerrybw/SIP-SWITCH.git
+cd SIP-SWITCH
+
+# 全新机器：探测对外 SIP IP + 生成全部密钥 + 渲染配置 + 拉起整套服务
+./deploy.sh --up
+```
+
+`deploy.sh` 会依次完成：
+1. 探测本机对外 SIP IP（eth0 → 默认路由 → `hostname -I` 兜底），写入 `.env` 的 `EXT_SIP_IP`；
+2. **一次性生成** MySQL / ESL / Redis / JWT / 密码盐 / admin 明文+哈希 等全部密钥，并写入 `.env` 与 `config/docker/config_settings.yaml`；
+3. 从 `.env.example` + `config/docker/config.example.yaml` 模板渲染出真实配置；
+4. `docker compose up -d` 拉起 `mysql / freeswitch / gateway / redis / sipp-stub`。
+
+> 幂等：检测到已有配置时只刷新随 IP 变化的项，**不会重生成密钥**（`--force` 才重生成全部）。
+> 起的栈默认不含真实运营商网关，需在管理端 `/admin` 手工建落地网关与接入点（见下文）。
+
+### 0.2 WSL 开发环境
+
+```bash
+# 已克隆、只想拉起/重启栈，或 WSL 重启后重注对外 IP：
+./dev-up.sh
+```
+
+> `dev-up.sh` 先全栈 `docker compose up -d`，再 `--force-recreate freeswitch` 把最新探测的
+> `EXT_SIP_IP` 注入容器（WSL 重启 IP 会漂移，必须重注）。
+
+### 0.3 仅网关进程（开发 / 调试，需自备 FS + MySQL）
+
+```bash
+cd SIP-SWITCH
 python3 -m venv venv && . venv/bin/activate
-pip install -r requirements.txt        # python-esl 不在 PyPI，需另行从 FreeSWITCH 源码安装（见下方说明）
-```
-
-### 2. 配置
-
-```bash
-cp config.example.yaml config_settings.yaml
-# 编辑 config_settings.yaml：填入 esl/mysql/auth 真实值（见模板内注释）
-```
-
-> ⚠️ `config_settings.yaml` 含全部密钥（ESL 密码 / MySQL 密码 / JWT 密钥 / admin 密码哈希），
-> 已被 `.gitignore` 忽略。**切勿提交**，也不要在 Issue/PR 中贴出。
-
-### 3. 运行
-
-```bash
+pip install -r requirements.txt
+cp config/docker/config.example.yaml config/docker/config_settings.yaml
+# 编辑 config/docker/config_settings.yaml：填入 esl/mysql/auth 真实值
 python -m src.main
-# 管理后台: http://<host>:8000/admin
-# 健康检查: GET /healthz
+# 管理后台: http://<host>:8000/admin   健康检查: GET /healthz
 ```
 
-> 以下「FreeSWITCH 对接」一节显式列出 FS 的版本、安装与配置。落地网关由网关在管理端创建/编辑/删除时**自动下发**到 FS（见 §4.3），无需手工编辑 FS 配置文件。
+> ⚠️ `config/docker/config_settings.yaml` 含全部密钥（ESL / MySQL / JWT / admin 哈希），
+> 已被 `.gitignore` 忽略，**切勿提交**，也不要在 Issue/PR 中贴出。
+> 该路径仅供独立调试网关逻辑；完整系统请走 §0.1 的 docker 一键起。
 
 ---
 
