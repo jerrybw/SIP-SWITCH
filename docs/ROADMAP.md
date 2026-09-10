@@ -50,7 +50,7 @@
 | T-201 | 主被叫限制规则（`*`/`?`） | `build_allow_xml` / `build_deny_xml` / `build_empty_xml` |
 | T-202 | 前缀↔落地 + 最长匹配 | `src/route/service.py:118` 排序 `(-len(prefix), -priority, id)` |
 | T-203 | 允许/禁止落地 | `access_gateway_policy` + `_ap_gateway_allowed()` |
-| T-204 | 心跳检查（OPTIONS/剔除/恢复） | `src/heartbeat.py`：UDP OPTIONS 按 `(ip,port)` 分组；连续 `FAIL_THRESHOLD` 次失败才置离线，任一次成功立即恢复 |
+| T-204 | 心跳检查（OPTIONS/剔除/恢复） | `src/heartbeat.py`：UDP OPTIONS 按 `(ip,port)` 分组；连续 `FAIL_THRESHOLD` 次失败才置离线，任一次成功立即恢复。**探测周期**取所有启用心跳网关的 `MIN(heartbeat_interval)`（每轮现读 DB，`heartbeat.py::_plan_interval`；2026-09-10 修死配置） |
 | T-205 | 故障切换分级 | `dialplan_xml.py` 恒定追 8 个 Q.850 cause；多候选逐腿 unrolled failover |
 | T-206 | 并发上限三级 | `app.py:209-210 / 256-266` 全局 + AP + GW，超限 503 |
 | T-207 | CDR 三段主被叫 + 计费时长 | `cdr` 表 + `billsec` |
@@ -113,7 +113,7 @@
 |---|---|---|---|
 | P2-a | 状态外移 Redis + 原子预留（D7） | ❌ | **Redis 未引入**（`src/` 与 `requirements.txt` 均无） |
 | P2-b | fail-close / spool 补偿 / 逃生开关 | ⚠️ | ✅ 并发预检超限 503（`app.py:256-266`）、✅ spool + reaper（`_spool_cdr` / `start_cdr_reaper`）；fail-open 逃生待确认 |
-| P2-c | 并发作为**选路因子**（D8 v1.3） | ❌ | 见下方"易混淆"说明 |
+| P2-c | 并发作为**选路因子**（D8 v1.3） | ⚠️ **部分完成**（打标 ✅ / 选路 ✅ 基础版 / 原子预留 ❌ 依赖 P2-a） | 见下方"易混淆"说明 |
 
 > ⚠️ **时序铁律（不得颠倒）：P2-a → P2-b → P2-c**
 > b/c 都依赖"准入时即时准确"的并发值，而现有计数是**事件驱动**（仅 A 腿、需等 `CHANNEL_CREATE`）。
@@ -123,10 +123,11 @@
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| **并发预检（fail-close）** | ✅ 已完成 | 三档（全局/AP/GW）超限 → 直接 503 拒绝，`app.py:256-266` |
-| **并发作为选路因子** | ❌ 未实现 | 需"满了自动换下一个候选"。实际是 `app.py:241 gw = candidates[0]` 只取首个候选，超限即 503 **不回退**；`route/service.py:118` 排序**无并发项**；`_enrich_candidates` 不做并发过滤 |
+| **并发预检（fail-close）** | ✅ 已完成 | 三档（全局/AP/GW）超限 → 直接 503 拒绝，`app.py` `_route_via_ap` ⑤ 段 |
+| **并发打标（可追溯性）** | ✅ **已完成（2026-09-10）** | 复用 `switch_detail` 扩展字段（**未加新列**）：元素由 `gid:callee_out:cause` 扩为 `gid:callee_out[:conc_gw[:conc_limit]]:cause`，记录该腿**进入时**的并发快照；单候选路径同样打标（`_single_leg_detail`）；解析端 `esl_client._parse_switch_detail` 改**从右往左**解析以兼容老 3 段记录；前端 `fmtSwitchDetail` 追加 `[并发 x/上限y]` 标注。并发 503 的 `reject_reason` 亦改为机器可读串 `busy_limit_gw;gw=..;gw_conc=..;gw_limit=..;g_conc=..;g_limit=..`（`app._conc_detail`） |
+| **并发作为选路因子（回退）** | ⚠️ **基础版已完成（2026-09-10）** | `app._order_by_concurrency`：候选池按「是否已打满」**稳定重排**（未满的排前），首选满则自动降级到同池有余量的网关，**全满才 503**；`_enrich_candidates` 附带 `conc_gw/conc_limit/at_capacity`。⚠️ 仍**依赖事件驱动的近似计数**，未接 P2-a 原子预留 → 并发瞬时误差下仍可能超发（P2-a 才是根治） |
 
-**当前真实生效的选路因子**：① `status==1` ② **心跳状态**（离线直接剔除候选池，`route/service.py:100`）③ 前缀最长→priority→id ④ 接入点↔落地 allow/deny 策略
+**当前真实生效的选路因子**：① `status==1` ② **心跳状态**（离线直接剔除候选池，`route/service.py:104`）③ 前缀最长→priority→id ④ 接入点↔落地 allow/deny 策略 ⑤ **并发未打满优先**（`_order_by_concurrency`，P2-c 2026-09-10）
 
 ## 8. 集群高可用 / M4 容量验证 / P3 / P4
 
@@ -161,7 +162,7 @@
 | 1 | **Redis 高可用形态**（Sentinel / Cluster / 云托管） | 整条 P2 链；引入后 Redis 是强依赖，fail-close 下不可用 = 全站拒呼，高可用从建议变**强制** |
 | 2 | 二期计费提前完成是否有意决策 | 算"已完成"还是"待评审" |
 | 3 | M4 压测是否准备云上规格（FS 16C32G + 同地域压测机） | M4 能否启动 |
-| 4 | P2-c 打标字段（`gw_overflowed` + 原始首选 `gw_id`）落新列 or 扩展字段 | 撤销"等价候选"限定后，打标**由建议升级为必需**（费率可追溯性唯一保障） |
+| 4 | ~~P2-c 打标字段（`gw_overflowed` + 原始首选 `gw_id`）落新列 or 扩展字段~~ **已拍板 2026-09-10：走扩展字段，复用 `switch_detail`**（不加列） | ✅ 已落地 |
 | 5 | 生产策略：继续"等 dev 单机+多机成熟后按成熟方案重部署" | 当前决策=等重部署 |
 
 ---
@@ -214,3 +215,42 @@
   - 正解是**统一响应**：一条正则 recv 匹配 `REGISTER|INVITE|ACK|BYE|OPTIONS|...`，回同一个 `200 OK`（SDP body 让 INVITE 可接通，`Content-Length` 用 sipp 自动变量 `[len]` 动态算），加 `-rtp_echo` 回媒体。ACK/BYE/OPTIONS 必须一并匹配，否则撞上 mandatory recv 会让场景失败退出（桩死掉）。
   - 验证（FS1 / `test-register-gw`）：同一实例同时 `State REGED / Status UP / Expires 600`，且 `originate sofia/gateway/test-register-gw/9001 &echo()` → `callstate=ACTIVE / read_codec=PCMU / write_codec=PCMU`。
   - ⚠️ 这条**推翻了 PITFALLS #42** 早先"sipp 单实例无法三合一"的结论（详见 PITFALLS #50）。
+
+## 2026-09-10 修复记录（三，dev 验证通过）
+
+本轮用户拍板四项，全部落地并 dev 实测。
+
+### 1. fix: `heartbeat_interval` 死配置 → 真正生效（PITFALLS #53 闭环）
+
+- **问题**：`gateway.heartbeat_interval` 在 DB 列 / schema DDL / 前端表单 / CRUD 写白名单**四处都有**，但**全仓无读点**——`heartbeat.py` 从不引用它，实际周期硬编码在 `main.py:31` 的 `HeartbeatProber(interval=30)`。改多少都还是 30s。三处默认值还互相打架（DB/schema=10、前端=10、运行=30）。
+- **修复**（`src/heartbeat.py`）：新增 `_plan_interval(db)` —— 每轮探测完**现读 DB**，取所有 `status=1 AND heartbeat_enabled=1` 网关的 **`MIN(heartbeat_interval)`** 作为下一轮睡眠时长；`_clamp()` 夹取到 `[MIN_INTERVAL=5, MAX_INTERVAL=3600]`（防 0 打满 CPU / 配太大导致假死无感知）；DB 读不到时回落 `DEFAULT_INTERVAL=30`。`HeartbeatProber.interval` 构造参数**退化为兜底值**，`main.py` 改为 `HeartbeatProber()`（不再硬编码 30）。
+- **粒度取舍**：现有实现是「单线程、一轮探所有网关、按 (ip,port) 分组」；而字段是 **per-gateway**。取 `min` 的意义是**粒度最细者的周期被严格遵守，其余只会被更频繁地探测**（偏保守、不会漏探测），且不引入 per-gateway 定时器重构。这是本轮明确的权衡，非疏漏。
+- **三处默认值统一为 30**：`src/db/models.py:91`、`deploy/mysql/init/01-schema.sql:245`、`src/static/admin.js:67`。
+- **实测**：三网关全设 30s → 采样 `last_heartbeat_time` 约 30s 一跳；全设 20s → 实测跳变间隔 ≈20s（`09:21:04→09:21:24→09:21:44`）；全设 3s → 间隔缩短到 ~3-7s。**字段真正生效**，改配置无需重启进程（每轮现读）。
+
+### 2. fix: `provision_pending` 截断导致漏重建 → 位点跳跃时改走全量
+
+- **问题**：`bump_pending` 在 JSON 超 `_MAX_PENDING_JSON=480` 字符时 `merged.pop(0)` **丢最老的名字**（`system_setting.value` 是 varchar(512)）；而 watcher 只在 pending **为空**时才全量 —— 某节点长期离线、期间变更过多（约 >24 个网关）时回来，被丢弃的网关**永远不会被重建**。
+- **修复**（`src/fs_provision.py` `_sync_once`）：新增 `jumped = (seq - self._last_seq) > 1`，`if pending and not jumped` 才走精确 `resync(pending)`，否则落入全量 `rescan_all()`；日志区分原因 `full rebuild (seq jumped (pending may be truncated))` vs `(no pending names)`。
+- **实测**：seq 12→16（跳跃，pending 非空）→ 日志 `full rebuild (seq jumped (pending may be truncated))`；seq 16→17（相邻）→ `resync ['test-register-gw']`（精确路径保留）。两条路径均正确。
+
+### 3. feat: P2-c 并发打标 + 并发选路（扩展字段，复用 `switch_detail`）
+
+- **拍板**：打标字段走**扩展字段**、**复用 `switch_detail`**，不加新列（ROADMAP §10 #4 已闭环）。
+- **打标格式**：元素由 `gid:callee_out:cause` 扩为 `gid:callee_out[:conc_gw[:conc_limit]]:cause`（并发段在中间，cause 恒为最后一段）。
+  - 多腿：`dialplan_xml._leg_ext` 的 `gw_detail` 从 `app._enrich_candidates` 带来的 `conc_gw/conc_limit` 拼入；**值在网关层算好，dialplan 只搬运**（守住"决策全在网关层"铁律）。
+  - 单候选：新增 `dialplan_xml._single_leg_detail()`，让「切换明细」列在无 failover 时也有并发快照可看（此前恒空）。
+- **解析兼容**：`esl_client._parse_switch_detail` 改**从右往左**解析（末段恒为 cause，中间段按位置映射），老 3 段记录照常解析、新 5 段带上 `conc_gw/conc_limit` 键；无并发键时不塞默认 0（避免"看起来并发是 0"的误读）。WIN 兜底补腿同样不塞 conc 键。
+- **选路（D8 落地）**：新增 `app._order_by_concurrency()` —— 候选池按「是否已打满」**稳定重排**（Python 排序稳定，同组内保持 原前缀/优先级 语义），首选满则自动降级到同池还有余量的网关，**全满才 503**。`_phone_branch` 与 `_route_via_ap` 双路径均已接入。
+- **503 机器可读**：新增 `app._conc_detail()`，`reject_reason` 由裸 `busy_limit_gw` 改为 `busy_limit_gw;gw=7;gw_conc=5;gw_limit=5;g_conc=12;g_limit=20;ap=5;ap_conc=3`。
+- **前端**：`admin.js fmtSwitchDetail` 在有 `conc_gw` 时追加 ` [并发 x/上限y]`（`conc_limit=0` 显示 `∞`）。
+- **实测（真实呼叫）**：sipp 当 UAC 呼 `cc8888`（候选池 `[testgw, testgateway]`），首腿 gw8 失败、次腿 gw7 胜出，CDR id=64 落库：
+  ```json
+  [{"gateway_id":8,"callee_out":"cc8888","cause":"NORMAL_TEMPORARY_FAILURE","conc_gw":0,"conc_limit":0},
+   {"gateway_id":7,"callee_out":"cc8888","cause":"WIN"}]
+  ```
+  同时核对：单候选路径下发 `cdr_switch_detail=;7:ccc9999:0:0:WIN`；多腿路径两条腿均带 `:0:0:` 并发段。解析器往返一致性单测通过（老/新/混合格式）。
+
+### 4. chore: 纪律更新 —— 待办只认 ROADMAP
+
+- 用户拍板：**忽略 wb-issues 看板的「待开始」7 项，今后待办事实来源只认本 ROADMAP**。已写入 `.workbuddy/memory/MEMORY.md`。

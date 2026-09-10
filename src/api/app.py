@@ -213,12 +213,22 @@ app.include_router(crud_router)
 
 
 
-def _enrich_candidates(db, candidates, caller, callee):
+def _enrich_candidates(db, candidates, caller, callee, conc=None):
     """逐腿候选：对每个候选网关计算其专属出局号(apply_translate)与 failover 配置，
-    供 build_outbound_xml 逐腿桥接（T-205：每腿用本 gw 的变换号与 switch_codes）。"""
+    供 build_outbound_xml 逐腿桥接（T-205：每腿用本 gw 的变换号与 switch_codes）。
+
+    P2-c：额外附带**并发预检快照**，供下游打标（落进 switch_detail 的扩展字段）：
+    - `conc_gw`：该网关当前并发；`conc_limit`：其 concurrent_limit（0=不限）
+    - `at_capacity`：该腿此刻是否已打满 —— 多腿文档里据此标注"为何这一腿被跳过/为何最终 503"
+    `conc` 复用调用方已取的 get_concurrency() 结果，避免每个候选各读一次 Redis。
+    """
+    conc = conc or get_concurrency()
+    gw_conc = (conc or {}).get("gw") or {}
     legs = []
     for g in candidates:
         co, ce = apply_translate(db, OWNER_GATEWAY, g.id, caller, callee)
+        cur = int(gw_conc.get(g.id, 0) or 0)
+        lim = int(getattr(g, "concurrent_limit", 0) or 0)
         legs.append({
             "gateway_id": g.id,
             "name": g.name,
@@ -229,8 +239,51 @@ def _enrich_candidates(db, candidates, caller, callee):
             "port": getattr(g, "port", ""),
             "switch_codes": g.switch_codes or "503,500,408,486",
             "failover_pre_ring_only": int(getattr(g, "failover_pre_ring_only", 0) or 0),
+            # P2-c 打标扩展字段（复用 switch_detail 元素结构，见 esl_client._parse_switch_detail）
+            "conc_gw": cur,
+            "conc_limit": lim,
+            "at_capacity": 1 if (lim > 0 and cur >= lim) else 0,
         })
     return legs
+
+
+def _order_by_concurrency(candidates, conc, gw_key="gw"):
+    """P2-c：按「当前并发是否打满」对候选池做**稳定重排**（未打满的排前面）。
+
+    只在顺序上做文章，不改变 select_outbound_gateway 的前缀/优先级语义：Python 排序稳定，
+    同组内保持原有相对顺序（长前缀 → 大优先级 → id）。
+    这样「首选网关已满」时能自动降级到同候选池里还有余量的网关，而不是直接 503
+    —— 即 D8「全候选并发过滤」在**选路**层面的落地。
+    """
+    gw_conc = (conc or {}).get(gw_key) or {}
+    if not gw_conc:
+        return list(candidates)
+
+    def full(g):
+        lim = int(getattr(g, "concurrent_limit", 0) or 0)
+        return 1 if (lim > 0 and int(gw_conc.get(g.id, 0) or 0) >= lim) else 0
+
+    return sorted(candidates, key=full)
+
+
+def _conc_detail(gw, conc, ap_id=None, reason=""):
+    """构造并发 503 的**机器可读**原因串（P2-c 打标）。
+
+    形如 `busy_limit_gw;gw=7;gw_conc=5;gw_limit=5;g_conc=12;g_limit=20;ap=5;ap_conc=3;ap_limit=10`
+    —— 分号分隔的 key=value，既是 reject_reason 也便于日志检索与后续告警打标。
+    """
+    ap_conc = (((conc or {}).get("ap") or {}).get(ap_id, 0) if ap_id is not None else 0)
+    parts = [reason or "busy_limit_gw"]
+    if gw is not None:
+        parts.append("gw=%d" % gw.id)
+        parts.append("gw_conc=%d" % int(((conc or {}).get("gw") or {}).get(gw.id, 0) or 0))
+        parts.append("gw_limit=%d" % int(getattr(gw, "concurrent_limit", 0) or 0))
+    parts.append("g_conc=%d" % int((conc or {}).get("global", 0) or 0))
+    parts.append("g_limit=%d" % int(settings.get("concurrent_limit_global", 0) or 0))
+    if ap_id is not None:
+        parts.append("ap=%d" % ap_id)
+        parts.append("ap_conc=%d" % int(ap_conc or 0))
+    return ";".join(parts)
 
 
 def _phone_branch(db, caller, callee, context="default", phone=None):
@@ -262,10 +315,18 @@ def _phone_branch(db, caller, callee, context="default", phone=None):
     gg=int(settings.get("concurrent_limit_global",0) or 0)
     cc=get_concurrency()
     if gg>0 and cc["global"]>=gg:
-        return Response(content=build_deny_xml("busy_limit_global",sip_code="503"),media_type="text/xml")
+        return Response(content=build_deny_xml(_conc_detail(gw,cc,None,"busy_limit_global"),sip_code="503"),media_type="text/xml")
+    # P2-c：网关维度先按并发重排候选池（未打满的优先），全满才 503
+    if any(int(getattr(x,"concurrent_limit",0) or 0)>0 for x in c):
+        ro=_order_by_concurrency(c,cc)
+        if [x.id for x in ro]!=[x.id for x in c]:
+            c=ro
+            gw=c[0]
+            gl=int(getattr(gw,"concurrent_limit",0) or 0)
+            co,ce=apply_translate(db, OWNER_GATEWAY, gw.id, caller, callee)
     if gl>0 and cc["gw"].get(gw.id,0)>=gl:
-        return Response(content=build_deny_xml("busy_limit_gw",sip_code="503"),media_type="text/xml")
-    legs = _enrich_candidates(db, c, caller, callee)
+        return Response(content=build_deny_xml(_conc_detail(gw,cc,None,"busy_limit_gw"),sip_code="503"),media_type="text/xml")
+    legs = _enrich_candidates(db, c, caller, callee, conc=cc)
     print("[phone-outbound]",legs[0]["caller_out"],"->",legs[0]["callee_out"],"gw",gw.name,flush=True)
     return Response(content=build_outbound_xml(legs[0]["callee_out"],candidates=legs,gateway_id=legs[0]["gateway_id"],carrier_id=legs[0]["carrier_id"],bill_unit=60,access_point_id=None,record_enabled=1,caller=legs[0]["caller_out"],caller_type="phone", caller_mid=caller, callee_mid=callee, context=context, dst_ip=legs[0]["ip"], dst_port=legs[0]["port"], account_id=acct_id),media_type="text/xml")
 
@@ -305,19 +366,29 @@ def _route_via_ap(db, ap, bill_unit, caller, callee, context="default"):
 
     # ⑤ 并发预检（P2, D3 超限回 503）
     # 维度上限：全局取自 settings.concurrent_limit_global；接入点/落地网关取自表 concurrent_limit。
-    gw_limit = int(getattr(gw, "concurrent_limit", 0) or 0)
     ap_limit = int(getattr(ap, "concurrent_limit", 0) or 0)
     g_limit = int(settings.get("concurrent_limit_global", 0) or 0)
     conc = get_concurrency()
     if g_limit > 0 and conc["global"] >= g_limit:
         print(f"[conc-limit] global {conc['global']}>={g_limit} busy_limit_global", flush=True)
-        return Response(content=build_deny_xml("busy_limit_global", sip_code="503", context=context), media_type="text/xml")
+        return Response(content=build_deny_xml(_conc_detail(gw, conc, ap_id, "busy_limit_global"), sip_code="503", context=context), media_type="text/xml")
     if ap_limit > 0 and conc["ap"].get(ap_id, 0) >= ap_limit:
         print(f"[conc-limit] ap {ap_id} {conc['ap'].get(ap_id, 0)}>={ap_limit} busy_limit_ap", flush=True)
-        return Response(content=build_deny_xml("busy_limit_ap", sip_code="503", context=context), media_type="text/xml")
+        return Response(content=build_deny_xml(_conc_detail(gw, conc, ap_id, "busy_limit_ap"), sip_code="503", context=context), media_type="text/xml")
+    # P2-c：网关维度**不再只判首选**。先按「是否已打满」稳定重排候选池，再拿新的首选做预检；
+    # 全部打满时才回 503（D8 全候选并发过滤）。这避免了「首选满、次选还有空」却直接拒呼。
+    if any(int(getattr(c, "concurrent_limit", 0) or 0) > 0 for c in candidates):
+        reordered = _order_by_concurrency(candidates, conc)
+        if [c.id for c in reordered] != [c.id for c in candidates]:
+            print(f"[conc-limit] candidate reorder by concurrency: "
+                  f"{[c.name for c in candidates]} -> {[c.name for c in reordered]}", flush=True)
+            candidates = reordered
+            legs = _enrich_candidates(db, candidates, caller_mid, callee, conc=conc)
+            gw = candidates[0]
+    gw_limit = int(getattr(gw, "concurrent_limit", 0) or 0)
     if gw_limit > 0 and conc["gw"].get(gw.id, 0) >= gw_limit:
         print(f"[conc-limit] gw {gw.id} {conc['gw'].get(gw.id, 0)}>={gw_limit} busy_limit_gw", flush=True)
-        return Response(content=build_deny_xml("busy_limit_gw", sip_code="503", context=context), media_type="text/xml")
+        return Response(content=build_deny_xml(_conc_detail(gw, conc, ap_id, "busy_limit_gw"), sip_code="503", context=context), media_type="text/xml")
 
     rec_enabled = ap.record_enabled if ap is not None else 1
     print(f"[outbound] {legs[0]['caller_out']}->{legs[0]['callee_out']} routed to gateway {gw.name} "

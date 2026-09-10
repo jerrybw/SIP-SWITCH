@@ -61,9 +61,14 @@ def _safe_int(v):
 
 
 def _parse_switch_detail(raw):
-    """T-205：把网关下发的扁平串 ';gid:num:cause;gid:num:cause' 解析为 JSON 数组入库。
+    """T-205：把网关下发的扁平串 ';gid:num[:conc[:clim]]:cause;...' 解析为 JSON 数组入库。
 
-    元素：{gateway_id, callee_out, cause}；cause=WIN 表示该腿接通胜出。
+    元素：{gateway_id, callee_out, cause[, conc_gw, conc_limit]}；cause=WIN 表示该腿接通胜出。
+
+    P2-c 扩展（2026-09-10）：本腿的并发快照打在同一元素里（放在 callee_out 与 cause 之间），
+    **向后兼容**——老记录是 3 段（无并发），新记录是 5 段（带并发）。
+    因此这里不能按固定下标取 cause，必须**从右往左**解析：最后一段恒为 cause，
+    中间剩下的段位按位置映射。concurrent_limit=0 表示「不限」。
     rec.get("switch_detail") 可能是原始扁平串或已解析的 list/dict（幂等）。
     """
     if raw is None:
@@ -78,15 +83,24 @@ def _parse_switch_detail(raw):
         part = part.strip()
         if not part:
             continue
-        seg = part.split(":", 2)
+        seg = part.split(":")
         gid = seg[0] if len(seg) > 0 else None
-        num = seg[1] if len(seg) > 1 else None
-        cause = seg[2] if len(seg) > 2 else None
-        out.append({
+        cause = seg[-1] if len(seg) > 1 else None
+        mid = seg[1:-1] if len(seg) > 2 else []
+        num = mid[0] if len(mid) > 0 else None
+        conc_gw = mid[1] if len(mid) > 1 else None
+        conc_limit = mid[2] if len(mid) > 2 else None
+        item = {
             "gateway_id": int(gid) if gid and gid.isdigit() else gid,
             "callee_out": num,
             "cause": cause,
-        })
+        }
+        # 仅在新格式（带并发段）时才附加这两个键，保持老记录结构不变
+        if conc_gw is not None:
+            item["conc_gw"] = _safe_int(conc_gw) if conc_gw != "" else None
+        if conc_limit is not None:
+            item["conc_limit"] = _safe_int(conc_limit) if conc_limit != "" else None
+        out.append(item)
     return out if out else None
 
 
@@ -467,6 +481,8 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
     ):
         if not isinstance(switch_detail, list):
             switch_detail = []
+        # 兜底补的 WIN 腿没有 dialplan 路径上的并发段（本腿值未知）→ 不塞 conc_* 键，
+        # 与老格式元素保持一致；前端按「键存在才展示」处理，避免显示 0 造成误解。
         switch_detail = switch_detail + [{
             "gateway_id": int(rec["gateway_id"])
             if isinstance(rec["gateway_id"], int)

@@ -28,7 +28,8 @@ if __name__ == '__main__':
     esl = ESLClient()
     esl.start()
     start_cdr_reaper()  # T-208：周期重灌 cdr_spool，DB 抖动恢复后补足落库失败的 CDR
-    prober = HeartbeatProber(interval=30)
+    # 探测周期以 gateway.heartbeat_interval 为准（每轮现读 DB）；此参数仅为 DB 不可用时的兜底
+    prober = HeartbeatProber()
     prober.start()
     start_phone_sync()
     start_gateway_provision()  # 全新部署时重建落地网关 XML（卷被清空的兜底）

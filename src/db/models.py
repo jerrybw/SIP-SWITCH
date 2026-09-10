@@ -88,7 +88,7 @@ class Gateway(Base):
     password = mapped_column(String(128))
     concurrent_limit = mapped_column(Integer, default=0)
     heartbeat_enabled = mapped_column(SmallInteger, default=1)
-    heartbeat_interval = mapped_column(Integer, default=10)
+    heartbeat_interval = mapped_column(Integer, default=30)
     heartbeat_timeout = mapped_column(Integer, default=3)
     heartbeat_status = mapped_column(SmallInteger, default=1)
     last_heartbeat_time = mapped_column(DateTime)

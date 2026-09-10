@@ -242,7 +242,7 @@ CREATE TABLE `gateway` (
   `password` varchar(128) DEFAULT NULL,
   `concurrent_limit` int NOT NULL DEFAULT '0' COMMENT '落地并发上限，0=不限制',
   `heartbeat_enabled` tinyint NOT NULL DEFAULT '1' COMMENT '是否启用 OPTIONS 心跳',
-  `heartbeat_interval` int NOT NULL DEFAULT '10' COMMENT '心跳周期秒',
+  `heartbeat_interval` int NOT NULL DEFAULT '30' COMMENT '心跳周期秒',
   `heartbeat_timeout` int NOT NULL DEFAULT '3' COMMENT '连续失败阈值次数',
   `heartbeat_status` tinyint NOT NULL DEFAULT '1' COMMENT '1 在线 0 剔除',
   `last_heartbeat_time` datetime(3) DEFAULT NULL,
@@ -269,7 +269,6 @@ CREATE TABLE `gateway` (
   CONSTRAINT `chk_gw_concurrent` CHECK ((`concurrent_limit` >= 0)),
   CONSTRAINT `chk_gw_cost_rate` CHECK (((`cost_rate` is null) or (`cost_rate` > 0)))
 ) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='落地网关';
-
 CREATE TABLE `operation_log` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `operator` varchar(64) NOT NULL,

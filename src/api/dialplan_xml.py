@@ -200,6 +200,30 @@ def build_deny_xml(reason: str = "", sip_code: str = "603", context="default",
     return "\n".join(lines) + "\n"
 
 
+def _single_leg_detail(c: dict, callee: str = "") -> str:
+    """P2-c：为**单候选**路径生成 switch_detail 值（与多腿同结构）。
+
+    为什么要给单候选也打：用户体验上「切换明细」列只有发生过 failover 才有内容，
+    但并发诊断需要知道"这一通呼出时落地网关的并发水位"。单候选时它恒为一条 WIN 腿，
+    打上并发快照后，运维在话单里就能直接看到该腿进入时的负载。
+
+    格式与多腿完全一致：`gid:callee_out[:conc_gw[:conc_limit]]:WIN`。
+    与多腿路径的差别：这里在**网关层**（Python）直接拼字面量，不经 FS 变量求值
+    ——单候选没有 transfer/后置 set 链路，本腿必定胜出，故 cause 恒为 WIN。
+
+    ⚠️ 首字符 `;` 不能省：_parse_switch_detail 与多腿路径共用，多腿是「前缀拼接」语义。
+    """
+    gid = c.get("gateway_id")
+    num = c.get("callee_out") or callee
+    conc_gw = c.get("conc_gw")
+    conc_limit = c.get("conc_limit")
+    seg = "%s:%s" % (gid, num)
+    if conc_gw is not None or conc_limit is not None:
+        seg += ":%s:%s" % ("" if conc_gw is None else int(conc_gw),
+                           "" if conc_limit is None else int(conc_limit))
+    return ";%s:WIN" % seg
+
+
 def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_id=None,
                        bill_unit=60, access_point_id=None, record_enabled=1,
                        caller=None, caller_type=None, context="default", caller_in=None, callee_in=None, dst_ip=None, dst_port=None, caller_mid=None, callee_mid=None, account_id=None) -> str:
@@ -208,7 +232,8 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
     候选字典结构（每个候选网关一条）：
         {gateway_id, name, carrier_id, caller_out(逐腿变换后主叫),
          callee_out(逐腿变换后被叫), switch_codes(本gw failover码),
-         failover_pre_ring_only(1=未振铃才切)}
+         failover_pre_ring_only(1=未振铃才切),
+         conc_gw/conc_limit/at_capacity(P2-c 并发预检快照，可选)}
 
     - 单候选：单 bridge（无故障切换），CDR 影响=零，行为同旧。
     - 多候选：逐腿展开（unrolled）故障切换（取代依赖 list_get 的 transfer 回环；
@@ -275,6 +300,9 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
             cdr.append("          " + _act('set', 'cdr_dst_port=%s' % dst_port))
         cdr.append("          " + _act('set', 'cdr_switch_count=0'))
         cdr.append("          " + _act('set', 'cdr_bill_unit=%s' % bill_unit))
+        # P2-c：单候选也打并发快照，元素结构同多腿 switch_detail（gid:callee_out[:conc[:limit]]:cause），
+        # 使 CDR 侧不论单/多候选都能用同一套 _parse_switch_detail 解析与展示。
+        cdr.append("          " + _act('set', 'cdr_switch_detail=%s' % _single_leg_detail(c, callee)))
         cdr.append("          " + _act('set', 'hangup_after_bridge=true'))
         tail = [
             "          " + _act('bridge', bridge_data),
@@ -368,7 +396,21 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
                                 + _var("cond(" + _var("gw_leg_progress") + " == 1 ? yes : no)") + " : no)")
         gw_cause = _var("cond(" + _var("originate_failed_cause") + " == NONE ? WIN : "
                          + _var("originate_failed_cause") + ")")
-        gw_detail = (_var("gw_failover_detail") + ";%s:%s:" % (gid, callee_out) + _var("gw_cause"))
+        # P2-c 打标扩展字段：把「本腿进入时的并发快照」一起写进 switch_detail 元素。
+        # 复用同一套分号扁平串（元素 = gid:num:cause[:conc[:clim]]），解析端向后兼容：
+        # 老记录只有 3 段 → conc/limit 为 None，新记录 5 段 → 带上并发，前端可选择性展示。
+        # 值在**网关层**算好（app._enrich_candidates 已带上 conc_gw/conc_limit），dialplan 只搬运，
+        # 避免在 FS 里做任何决策（架构铁律：决策全在网关层）。
+        conc_gw = c.get("conc_gw")
+        conc_limit = c.get("conc_limit")
+        conc_seg = ""
+        if conc_gw is not None or conc_limit is not None:
+            conc_seg = ":%s:%s" % (
+                "" if conc_gw is None else int(conc_gw),
+                "" if conc_limit is None else int(conc_limit),
+            )
+        gw_detail = (_var("gw_failover_detail") + ";%s:%s" % (gid, callee_out)
+                     + conc_seg + ":" + _var("gw_cause"))
         gw_count = _var("cond(" + _var("originate_failed_cause") + " == NONE ? "
                          + _var("gw_failover_count") + " : "
                          + _var("expr(" + _var("gw_failover_count") + " + 1)") + ")")

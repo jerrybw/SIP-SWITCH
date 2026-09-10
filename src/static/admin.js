@@ -64,7 +64,7 @@ const SECTIONS = {
       { k: 'concurrent_limit', label: '并发上限(0=不限)', type: 'number', def: 0 },
       { k: 'status', label: '状态', type: 'select', options: [{ v: 1, t: '启用' }, { v: 0, t: '停用' }] },
       { k: 'heartbeat_enabled', label: '心跳探测', type: 'select', options: [{ v: 1, t: '启用' }, { v: 0, t: '停用' }] },
-      { k: 'heartbeat_interval', label: '心跳间隔(秒)', type: 'number', def: 10 },
+      { k: 'heartbeat_interval', label: '心跳间隔(秒)', type: 'number', def: 30 },
       { k: 'heartbeat_timeout', label: '心跳超时(秒)', type: 'number', def: 3 },
       { k: 'heartbeat_status', label: '心跳状态', type: 'select', ro: true, options: [{ v: 1, t: '正常' }, { v: 0, t: '离线' }] },
       { k: 'heartbeat_fail_count', label: '连续失败', type: 'number', ro: true },
@@ -876,6 +876,8 @@ var CDR_FORCE_PUSH = ['account_id','access_point_id','carrier_id','source_ip','s
 
 // 切换明细格式化：把 switch_detail(JSON 数组)渲染成「网关名(出局号) → 失败码」可读列表，
 // gateway_id 经 /api/gateways 映射成网关名。原始值可能是字符串(JSON)或已解析数组。
+// P2-c：元素还可能带 conc_gw/conc_limit（该腿进入时的并发快照），有则追加 [并发 x/上限y] 标注；
+// 老记录没有这两个键 → 不显示（不做默认 0，避免"看起来并发是 0"的误读）。
 var GW_MAP = null;
 function ensureGwMap() {
   if (GW_MAP) return Promise.resolve(GW_MAP);
@@ -946,7 +948,13 @@ function fmtSwitchDetail(v) {
     var gname = (GW_MAP && GW_MAP[gid]) ? GW_MAP[gid] : ('gw' + gid);
     var callee = e.callee_out || '';
     var cause = e.cause || e.sip_code || '';
-    return (idx + 1) + '. ' + gname + (callee ? ('(' + callee + ')') : '') + (cause ? (' → ' + cause) : '');
+    // P2-c：并发快照标注（仅在新格式记录上出现）
+    var conc = '';
+    if (e.conc_gw !== undefined && e.conc_gw !== null) {
+      var lim = (e.conc_limit !== undefined && e.conc_limit !== null && e.conc_limit > 0) ? e.conc_limit : '∞';
+      conc = ' <span class="muted">[并发 ' + e.conc_gw + '/' + lim + ']</span>';
+    }
+    return (idx + 1) + '. ' + gname + (callee ? ('(' + callee + ')') : '') + (cause ? (' → ' + cause) : '') + conc;
   });
   return '<div style="white-space:nowrap">' + parts.join('<br>') + '</div>';
 }

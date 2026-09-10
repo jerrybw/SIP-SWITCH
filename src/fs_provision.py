@@ -324,14 +324,23 @@ class ProvisionWatcher:
         except Exception:
             pending = []
 
-        if pending:
+        # ⚠️ 名单不可信判定：本节点落后了不止一个版本（seq 跳跃），说明期间发生过多次变更，
+        # 而 `provision_pending` 会被 bump_pending 按 480 字符上限**砍掉最老的名字**
+        # （system_setting.value 是 varchar(512)，见 _MAX_PENDING_JSON）——
+        # 此时若只按名单精确 killgw，那些被砍掉的网关就**永远不会被重建**。
+        # 所以一旦发现跳跃，宁可全量重建（代价只是一次 profile rescan，幂等无害）。
+        jumped = (seq - self._last_seq) > 1
+        if pending and not jumped:
             log.info("[PS] seq %s -> %s: resync %s", self._last_seq, seq, pending)
             resync(pending)
         else:
-            # 没有精确名单（「立即全节点重扫」会显式清空 pending）：做**全量重建**。
+            # 全量重建的两种情形：
+            # a) 没有精确名单（「立即全节点重扫」会显式清空 pending）
+            # b) 名单可能已被截断（seq 跳跃，见上）→ 只信全量
             # 注意不能退化成裸 rescan —— rescan 对已存在的 gateway 无效（PITFALLS #30），
             # 那样点一下按钮等于什么都没发生。
-            log.info("[PS] seq %s -> %s: full rebuild (no pending names)", self._last_seq, seq)
+            reason = "seq jumped (pending may be truncated)" if jumped else "no pending names"
+            log.info("[PS] seq %s -> %s: full rebuild (%s)", self._last_seq, seq, reason)
             rescan_all()
         self._last_seq = seq
         report_seen(seq)

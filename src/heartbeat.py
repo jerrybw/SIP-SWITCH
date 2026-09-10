@@ -12,6 +12,13 @@
 防抖：连续 FAIL_THRESHOLD 次失败才置离线；任一次成功立即恢复（纳回）。
 #69 起：上下线翻转时调用 alerting.alert_if_changed 落 operation_log（状态未变去重），
 闭环坑位 #18「心跳告警未闭环」；仍只落库，不接外部通道（后续可从 operation_log 消费）。
+
+⚠️ 探测周期（2026-09-10 修，PITFALLS #53）：`gateway.heartbeat_interval` 曾是**死配置**
+——DB 列 / schema DDL / 前端表单 / CRUD 写白名单四处都有，但全仓无读点，
+实际周期硬编码在 `main.py` 的 `HeartbeatProber(interval=30)`，改多少都还是 30s。
+现在改为**每轮从 DB 现读各网关的 `heartbeat_interval`**（见 `_plan_interval`），
+按「最近到期的那个网关」决定本轮睡多久，从而在不引入 per-gateway 定时器复杂度的前提下
+让该字段真正生效；`interval` 构造参数退化为「DB 读不到值时的兜底周期」。
 """
 import socket
 import threading
@@ -25,7 +32,11 @@ from db.models import Gateway
 from alerting import alert_if_changed
 
 FAIL_THRESHOLD = 3        # 连续失败达到此值才判离线
-DEFAULT_INTERVAL = 30     # 探测周期(秒)，用户确认 30s
+DEFAULT_INTERVAL = 30     # 兜底探测周期(秒)；正常路径以 gateway.heartbeat_interval 为准
+
+# 探测周期上下界（防止把周期配成 0 导致 CPU 打满，或配成几小时导致"假死"无感知）
+MIN_INTERVAL = 5
+MAX_INTERVAL = 3600
 
 
 def _local_ip(dst_ip: str) -> str:
@@ -116,9 +127,39 @@ def _probe_once(db) -> None:
     db.commit()
 
 
+def _clamp(v) -> int:
+    try:
+        iv = int(v)
+    except (TypeError, ValueError):
+        return DEFAULT_INTERVAL
+    if iv <= 0:
+        return DEFAULT_INTERVAL
+    return max(MIN_INTERVAL, min(MAX_INTERVAL, iv))
+
+
+def _plan_interval(db) -> int:
+    """本轮该睡多久 = 所有启用探测的网关里**最小的** `heartbeat_interval`。
+
+    为什么取 min 而不是把每个网关拆成各自的定时器：现有实现是「一轮探测所有网关」
+    （且按 (ip,port) 分组共享结果），拆定时器要重做分组与调度，收益不成比例。
+    取 min 的意义是：粒度最细的那个网关的周期被严格遵守，其余网关只会被
+    **更频繁**地探测（偏保守、不会漏探测）；同时该字段从死配置变成真正生效。
+
+    DB 读不到（异常/无启用网关）时回落到 DEFAULT_INTERVAL。
+    """
+    vals = db.scalars(
+        select(Gateway.heartbeat_interval)
+        .where(Gateway.status == 1, Gateway.heartbeat_enabled == 1)
+    ).all()
+    if not vals:
+        return DEFAULT_INTERVAL
+    return min(_clamp(v) for v in vals)
+
+
 class HeartbeatProber:
     def __init__(self, interval: int = DEFAULT_INTERVAL):
-        self.interval = interval
+        # interval 退化为「DB 读不到值时的兜底周期」，正常路径走 _plan_interval
+        self.interval = _clamp(interval)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -130,12 +171,15 @@ class HeartbeatProber:
 
     def _run(self):
         while not self._stop.is_set():
+            sleep_s = self.interval
             try:
                 db = SessionLocal()
                 try:
                     _probe_once(db)
+                    # 探测完立刻按最新配置算下一轮周期（网关增删/改间隔无需重启进程）
+                    sleep_s = _plan_interval(db)
                 finally:
                     db.close()
             except Exception as e:
                 print("[HB] probe error:", e)
-            self._stop.wait(self.interval)
+            self._stop.wait(sleep_s)
