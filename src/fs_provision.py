@@ -16,10 +16,15 @@ gateway 无效。正确姿势：先 `killgw <name>` 销毁旧对象，再 rescan
 
 做法：用 DB `system_setting` 当跨节点信令
 - `provision_seq`：变更版本号，每次网关增删改 +1
-- `provision_pending`：最近变更的网关名 JSON 数组（让各节点能精确 killgw 重建）
+- `provision_pending`：**最近变更的网关名** JSON 数组（让各节点能精确 killgw 重建）
+- `provision_seen_<NODE_UUID>`：各节点**自己上报**的已同步位点（判断"是否真跟上"）
+
+⚠️ `provision_pending` 是「最近变更名单」，**不是待办队列**：watcher 只读它、从不消费，
+所以它不会随同步完成而变短。别再把它当作"还有几个没同步"（那是 `seen` 位点的事）。
+它清空的唯一时机是「立即全节点重扫」——那时各节点改走全量重建（见 force_all_nodes_rescan）。
 
 每个节点跑一个 ProvisionWatcher 后台线程轮询 seq，发现变化就对本节点 FS 补做
-killgw + rescan。
+killgw + rescan，然后把 seq 写进自己的 `provision_seen_<NODE_UUID>`。
 
 **为什么不直连其它节点的 ESL 广播**：生产多节点通常只共享 DB / Redis，节点间网络
 未必互通；且离线节点在线后能自动补齐（版本号一直落后，回来就补）。
@@ -43,6 +48,7 @@ PROF = "external"
 KEY_SEQ = "provision_seq"
 KEY_PENDING = "provision_pending"
 KEY_INTERVAL = "provision_sync_interval"
+KEY_SEEN_PREFIX = "provision_seen_"  # + NODE_UUID，各节点自己上报的已同步位点
 DEFAULT_SYNC_INTERVAL = 5
 _MAX_PENDING_JSON = 480  # system_setting.value 是 varchar(512)
 
@@ -88,6 +94,34 @@ def bump_pending(names):
     ss.set_setting(KEY_SEQ, str(seq), "网关下发变更版本号(每次增删改+1，各节点据此补扫)")
     ss.set_setting(KEY_PENDING, s, "最近变更的网关名 JSON 数组(供各节点精确 killgw)")
     return seq
+
+
+def report_seen(seq):
+    """上报「本节点已同步到的下发版本号」，供管理端判断各节点是否真的跟上。
+
+    ⚠️ 为什么需要它：`provision_pending` 是**只读不消费**的「最近变更名单」
+    （watcher 从不改写它，见 _sync_once），所以它永远不为空、长度也永远不降。
+    只看 pending 无法判断「某节点到底同步了没有」——各节点改用自己的位点来表达：
+    处理完 seq N 就写 `provision_seen_<NODE_UUID> = N`。
+    节点离线/进程挂掉时该值会停住，管理端据此显示「落后 N 个版本」，
+    这正是运维需要的信号（pending 给不出这个信息）。
+
+    注意：这是**每节点自写自读**的 key，不像 pending 会被多节点争抢覆盖。
+    """
+    try:
+        from core.config import NODE_UUID
+    except ImportError:  # pragma: no cover
+        from src.core.config import NODE_UUID  # type: ignore
+    if not NODE_UUID:
+        return
+    key = KEY_SEEN_PREFIX + str(NODE_UUID)
+    if len(key) > 64:  # system_setting.key 是 varchar(64)
+        key = key[:64]
+    try:
+        _sys_setting().set_setting(
+            key, str(seq), "本节点已同步到的网关下发版本号(节点自身轮询后上报)")
+    except Exception as e:
+        log.debug("report provision seen failed: %s", e)
 
 
 def rescan(prof=PROF, gw_name=None):
@@ -240,6 +274,8 @@ def force_all_nodes_rescan():
     if _WATCHER is not None:
         # 本节点刚做过全量重建，把位点对齐，避免 watcher 下一轮再重复扫一次
         _WATCHER._last_seq = seq
+    # 本节点此刻确实已经处理到 seq（且是主动发起者），立即上报位点
+    report_seen(seq)
     log.info("force_all_nodes_rescan: seq=%s (local rebuilt immediately)", seq)
     return seq
 
@@ -252,6 +288,8 @@ class ProvisionWatcher:
     使「在别的节点管理端做的变更」也落到本节点 FS 上。
 
     幂等性：各节点轮询周期不同步，重复 killgw/rescan 无害，故不需要精确消费位点。
+    （pending 因此保持"最近变更名单"语义、只读不消费；同步进度由各节点的
+    `provision_seen_<NODE_UUID>` 位点表达，见 report_seen。）
     """
 
     def __init__(self, interval: int = DEFAULT_SYNC_INTERVAL):
@@ -275,6 +313,7 @@ class ProvisionWatcher:
             # 首轮只对齐位点：启动时 gw_bootstrap 已负责初始下发，避免无谓重扫
             self._last_seq = seq
             log.info("[PS] provision watcher online at seq=%s", seq)
+            report_seen(seq)  # 上线即上报，管理端能立刻看到本节点已就绪
             return
 
         pending = []
@@ -295,6 +334,7 @@ class ProvisionWatcher:
             log.info("[PS] seq %s -> %s: full rebuild (no pending names)", self._last_seq, seq)
             rescan_all()
         self._last_seq = seq
+        report_seen(seq)
 
     def _run(self):
         while not self._stop.is_set():

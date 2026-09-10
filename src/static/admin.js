@@ -60,7 +60,7 @@ const SECTIONS = {
         options: [{ v: 0, t: '未注册' }, { v: 1, t: '已注册' }, { v: 2, t: '注册中' }, { v: 3, t: '注册失败' }],
         badgeMap: { 0: 'badge-off', 1: 'badge-on', 2: 'badge-warn', 3: 'badge-fail' },
         hint: '由 FreeSWITCH 的 sofia::gateway_state 事件实时回写，不可手工修改' },
-      { k: 'register_status_at', label: '状态更新时间', type: 'text', ro: true, fmt: 'time', noList: true },
+      { k: 'register_status_at', label: '状态更新时间', type: 'text', ro: true, fmt: 'time' },
       { k: 'concurrent_limit', label: '并发上限(0=不限)', type: 'number', def: 0 },
       { k: 'status', label: '状态', type: 'select', options: [{ v: 1, t: '启用' }, { v: 0, t: '停用' }] },
       { k: 'heartbeat_enabled', label: '心跳探测', type: 'select', options: [{ v: 1, t: '启用' }, { v: 0, t: '停用' }] },
@@ -1197,9 +1197,13 @@ function renderNodes(key, st) {
       '</div>' +
       '<div class="prov-stats">' +
         '<div class="prov-stat"><b id="pv_seq">—</b><span>下发版本号</span></div>' +
-        '<div class="prov-stat"><b id="pv_wait">—</b><span>待同步网关</span></div>' +
+        '<div class="prov-stat"><b id="pv_wait">—</b><span>最近变更</span></div>' +
         '<div class="prov-stat"><b id="pv_iv">—</b><span>轮询周期(秒)</span></div>' +
       '</div>' +
+      // 每节点自报的已同步位点：判断「是否真的都跟上了」只看这里
+      '<div class="prov-nodes" id="pv_nodes"></div>' +
+      // 最近一次变更涉及的网关名（历史名单，不等于"还没同步"）
+      '<div class="prov-pending" id="pv_pending_list"></div>' +
       '<div class="prov-foot">' +
         '<label>同步轮询周期</label>' +
         '<input id="pv_interval" class="pager-input" type="number" min="5" style="width:90px">' +
@@ -1207,7 +1211,10 @@ function renderNodes(key, st) {
         '<button class="btn btn-sm" id="pv_save">保存周期</button>' +
         '<span id="pv_msg" class="muted"></span>' +
       '</div>' +
-      '<div class="hint">「立即全节点重扫」= 本节点立刻 killgw 全部并 rescan，其它节点最迟一个轮询周期后跟上；' +
+      '<div class="hint">各节点处理完变更后会把「已同步位点」写回 DB，因此' +
+      '<b>只要每个节点的位点 = 下发版本号，就说明全节点都已生效</b>；' +
+      '位点落后或显示「未上报」表示该节点离线/进程异常，而非变更被丢弃。<br>' +
+      '「立即全节点重扫」= 本节点立刻 killgw 全部并 rescan，其它节点最迟一个轮询周期后跟上；' +
       '用于改完网关想马上确认所有节点都生效时。</div>' +
     '</div>' +
     '<div id="nodes-table" class="placeholder">加载中…</div>' +
@@ -1246,17 +1253,62 @@ function renderNodes(key, st) {
 }
 
 // ---- 多节点下发同步卡片 ----
+let _provCfg = null;
+let _nodeRows = null;
+
 function renderProvisionCard(cfg) {
   const seq = document.getElementById('pv_seq');
   if (!seq) return;
+  _provCfg = cfg || {};
   seq.textContent = cfg.provision_seq != null ? cfg.provision_seq : '—';
   let pending = [];
   try { pending = JSON.parse(cfg.provision_pending || '[]') || []; } catch (e) { pending = []; }
-  document.getElementById('pv_wait').textContent = pending.length;
-  document.getElementById('pv_wait').title = pending.join(', ');
+  const w = document.getElementById('pv_wait');
+  w.textContent = pending.length;
+  w.title = pending.length ? ('最近变更：' + pending.join(', ')) : '暂无变更记录';
   document.getElementById('pv_iv').textContent = cfg.provision_sync_interval || '5';
   const iv = document.getElementById('pv_interval');
   if (iv && document.activeElement !== iv) iv.value = cfg.provision_sync_interval || '5';
+
+  const pl = document.getElementById('pv_pending_list');
+  if (pl) {
+    pl.innerHTML = pending.length
+      ? '<span class="prov-tag-label">最近变更网关</span>' +
+        pending.map(function (n) { return '<code class="prov-tag">' + n + '</code>'; }).join('')
+      : '<span class="muted" style="font-size:12px">暂无网关变更记录（每次增删改落地网关都会记在这里，' +
+        '它是历史名单、不代表"没同步"）</span>';
+  }
+  renderNodeSeen();
+}
+
+// 各节点已同步位点：把 /api/nodes 的节点和 sys-config 里的 provision_seen_<uuid> 对上
+function renderNodeSeen() {
+  const el = document.getElementById('pv_nodes');
+  if (!el || !_nodeRows) return;
+  const seq = (_provCfg && _provCfg.provision_seq != null) ? Number(_provCfg.provision_seq) : null;
+  if (!_nodeRows.length) {
+    el.innerHTML = '<span class="muted" style="font-size:12px">暂无节点</span>';
+    return;
+  }
+  let h = '<span class="prov-tag-label">节点同步位点</span>';
+  _nodeRows.forEach(function (r) {
+    const uuid = r.node_uuid || '';
+    const raw = _provCfg ? _provCfg['provision_seen_' + uuid] : undefined;
+    const seen = (raw === undefined || raw === null || raw === '') ? null : Number(raw);
+    let cls = 'badge-off', txt = '未上报';
+    if (seen !== null && !isNaN(seen)) {
+      if (seq !== null && seen < seq) {
+        cls = 'badge-warn';
+        txt = '已同步 seq ' + seen + '（落后 ' + (seq - seen) + '）';
+      } else {
+        cls = 'badge-on';
+        txt = '已同步 seq ' + seen;
+      }
+    }
+    h += '<span class="prov-node"><b>' + (r.host || r.name || uuid) + '</b>' +
+      '<span class="badge ' + cls + '">' + txt + '</span></span>';
+  });
+  el.innerHTML = h;
 }
 
 function loadProvisionCard() {
@@ -1296,6 +1348,8 @@ function loadNodes() {
   if (!el) return;
   api('/api/nodes').then(function (data) {
     const rows = (data && data.items) || [];
+    _nodeRows = rows;
+    renderNodeSeen();  // 卡片里的「节点同步位点」随节点列表一起刷新
     if (!rows.length) {
       el.innerHTML = '<div class="placeholder">暂无节点。节点由网关按 NODE_UUID 自动注册，稍候刷新。</div>';
       return;

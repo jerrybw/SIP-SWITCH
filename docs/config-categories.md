@@ -7,7 +7,7 @@
 | 类别 | 载体 | 生效方式 | 示例 |
 |---|---|---|---|
 | 第1类 部署前配置 | `config_settings.yaml`（网关）+ `.env`（compose/FS） | 部署期由 `deploy.sh` 渲染，**重启生效** | mysql/redis 地址、ESL 密码、salt/jwt、node.uuid、external IP、端口 |
-| 第2类 热加载配置 | DB `system_setting` | **改后即时生效，无需重启** | `phone_sync_interval`、`ap_sync_interval`、`provision_sync_interval`、`webhook_*` |
+| 第2类 热加载配置 | DB `system_setting` | **改后即时生效，无需重启** | `phone_sync_interval`、`ap_sync_interval`、`provision_sync_interval`、`provision_seq`/`provision_pending`/`provision_seen_*`、`webhook_*` |
 | 第3类 启动快照 | `core.config.settings`（=第1类里"重启才生效"的子集） | 进程启动加载一次，恒定 | DB url、Redis 地址、ESL host/port/password、node.uuid、salt/jwt |
 | （不在配置里）业务配置 | DB 业务表 | 天然热生效 | 落地网关、路由、费率、接入点、账户 |
 
@@ -24,7 +24,7 @@
 - 读取必查库（默认不缓存），保证热加载语义；**严禁在模块级 / import 期缓存值**。
 - 现有 key（单位秒，下限 5）：`phone_sync_interval`（话机）、`ap_sync_interval`（接入点）、
   `provision_sync_interval`（多节点网关下发同步轮询周期，默认 5；管理端「节点状态」tab 顶部卡片可改）。
-- 非数值 key：`provision_seq` / `provision_pending`（多节点下发信令，由代码写、勿手改）、
+- 非数值 key：`provision_seq` / `provision_pending` / `provision_seen_<NODE_UUID>`（多节点下发信令与各节点自报的已同步位点，均由代码读写、勿手改）、
   `webhook_gateway_heartbeat_url` / `webhook_node_heartbeat_url`（外部告警地址，空=不推送）。
 - 新增第2类项：直接 `INSERT INTO system_setting(key,value,description)` 或走管理端 `PUT /sys-config`，读取端用 `get_int_setting` / `get_setting`。
 - FS 侧热加载（dialplan/directory via reloadxml、落地网关 via sofia rescan）仍走机制 A（xml_curl），不在此表。
