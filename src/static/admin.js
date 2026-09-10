@@ -52,6 +52,15 @@ const SECTIONS = {
         hint: '注册模式：只下发给所选节点（单选）；点对点模式全量下发所有节点，无需选择' },
       { k: 'username', label: '账号', type: 'text' },
       { k: 'password', label: '密码', type: 'password' },
+      { k: 'register_expire', label: '注册有效期(秒)', type: 'number', def: 600, noList: true,
+        hint: '注册模式专用：下发为 expire-seconds，FS 在到期前自动续注册；不填按默认 600（历史行为是 FS 自身默认 3600）' },
+      { k: 'register_retry', label: '注册重试间隔(秒)', type: 'number', def: 30, noList: true,
+        hint: '注册模式专用：注册失败后的重试间隔，下发为 retry-seconds' },
+      { k: 'register_status', label: '注册状态', type: 'select', ro: true,
+        options: [{ v: 0, t: '未注册' }, { v: 1, t: '已注册' }, { v: 2, t: '注册中' }, { v: 3, t: '注册失败' }],
+        badgeMap: { 0: 'badge-off', 1: 'badge-on', 2: 'badge-warn', 3: 'badge-fail' },
+        hint: '由 FreeSWITCH 的 sofia::gateway_state 事件实时回写，不可手工修改' },
+      { k: 'register_status_at', label: '状态更新时间', type: 'text', ro: true, fmt: 'time', noList: true },
       { k: 'concurrent_limit', label: '并发上限(0=不限)', type: 'number', def: 0 },
       { k: 'status', label: '状态', type: 'select', options: [{ v: 1, t: '启用' }, { v: 0, t: '停用' }] },
       { k: 'heartbeat_enabled', label: '心跳探测', type: 'select', options: [{ v: 1, t: '启用' }, { v: 0, t: '停用' }] },
@@ -353,7 +362,7 @@ async function loadOptions(field) {
 // 下次 showSection 的预加载会重新发请求拿到最新选项。
 function invalidateOptCache() { for (const k in OPT_CACHE) delete OPT_CACHE[k]; }
 function textOf(field, value) {
-  if (field.k === 'last_heartbeat_time') {
+  if (field.fmt === 'time' || field.k === 'last_heartbeat_time') {
     if (value === null || value === undefined || value === '') return '<span class="muted">—</span>';
     return fmtBJ(value);
   }
@@ -431,7 +440,7 @@ function renderTable(key, rows, st) {
   } else {
     html += '<table><thead><tr>';
     if (sec.showId) html += '<th>ID</th>';
-    sec.fields.forEach(function (f) { html += '<th>' + f.label + '</th>'; });
+    sec.fields.forEach(function (f) { if (!f.noList) html += '<th>' + f.label + '</th>'; });
     (sec.specials || []).forEach(function (sp) {
       if (sp === 'prefixes') html += '<th>路由前缀</th>';
       else if (sp === 'ap-policy') html += '<th>允许/禁止网关</th>';
@@ -441,7 +450,17 @@ function renderTable(key, rows, st) {
     rows.forEach(function (r) {
       html += '<tr>';
       if (sec.showId) html += '<td>' + (r.id !== undefined && r.id !== null ? r.id : '') + '</td>';
-      sec.fields.forEach(function (f) { html += '<td>' + textOf(f, r[f.listKey || f.k]) + '</td>'; });
+      sec.fields.forEach(function (f) {
+        if (f.noList) return;
+        const v = r[f.listKey || f.k];
+        if (f.badgeMap) {
+          const cls = f.badgeMap[String(v)];
+          const txt = textOf(f, v);
+          html += '<td>' + (cls ? '<span class="badge ' + cls + '">' + txt + '</span>' : txt) + '</td>';
+          return;
+        }
+        html += '<td>' + textOf(f, v) + '</td>';
+      });
       (sec.specials || []).forEach(function (sp) {
         if (sp === 'prefixes') {
           const pfx = (r._prefixes && r._prefixes.length) ? r._prefixes.join(',') : '';
@@ -561,7 +580,7 @@ async function openForm(key, id) {
     let control = '';
     if (f.ro) {
       var disp = val;
-      if (f.k === 'last_heartbeat_time') disp = val ? fmtBJ(val) : '—';
+      if (f.fmt === 'time' || f.k === 'last_heartbeat_time') disp = val ? fmtBJ(val) : '—';
       else if (f.options) { var _o = f.options.find(function (x) { return String(x.v) === String(val); }); if (_o) disp = _o.t; }
       // 自动分配字段（如租户号）新建时为空，给出回填占位提示，避免用户误以为保存会失败
       if (!disp && f.k === 'account_number') disp = '（保存后自动生成）';
@@ -1169,6 +1188,28 @@ function renderNodes(key, st) {
   c.innerHTML =
     '<div class="section-head"><h2>节点状态</h2>' +
     '<button class="btn btn-sm" id="nodes-refresh">刷新</button></div>' +
+    // 显眼卡片：多节点下发同步（版本号 + 周期 + 一键全节点重建）
+    '<div class="prov-card">' +
+      '<div class="prov-head">' +
+        '<div><div class="prov-title">多节点下发同步</div>' +
+        '<div class="prov-sub">任一节点改动落地网关 → 所有 FS 节点自动重建（经 DB 版本号信令，无需节点间互通）</div></div>' +
+        '<button class="btn btn-primary" id="pv_rescan">立即全节点重扫</button>' +
+      '</div>' +
+      '<div class="prov-stats">' +
+        '<div class="prov-stat"><b id="pv_seq">—</b><span>下发版本号</span></div>' +
+        '<div class="prov-stat"><b id="pv_wait">—</b><span>待同步网关</span></div>' +
+        '<div class="prov-stat"><b id="pv_iv">—</b><span>轮询周期(秒)</span></div>' +
+      '</div>' +
+      '<div class="prov-foot">' +
+        '<label>同步轮询周期</label>' +
+        '<input id="pv_interval" class="pager-input" type="number" min="5" style="width:90px">' +
+        '<span class="muted" style="font-size:12px">秒</span>' +
+        '<button class="btn btn-sm" id="pv_save">保存周期</button>' +
+        '<span id="pv_msg" class="muted"></span>' +
+      '</div>' +
+      '<div class="hint">「立即全节点重扫」= 本节点立刻 killgw 全部并 rescan，其它节点最迟一个轮询周期后跟上；' +
+      '用于改完网关想马上确认所有节点都生效时。</div>' +
+    '</div>' +
     '<div id="nodes-table" class="placeholder">加载中…</div>' +
     '<div class="card" style="margin-top:18px">' +
     '<div class="section-head"><h3>Webhook 推送配置</h3>' +
@@ -1188,15 +1229,66 @@ function renderNodes(key, st) {
     const nd = document.getElementById('wh_node');
     if (gw) gw.value = (cfg && cfg.webhook_gateway_heartbeat_url) || '';
     if (nd) nd.value = (cfg && cfg.webhook_node_heartbeat_url) || '';
+    renderProvisionCard(cfg || {});
   }).catch(function () {});
 
-  document.getElementById('nodes-refresh').onclick = function () { loadNodes(); };
+  document.getElementById('nodes-refresh').onclick = function () { loadNodes(); loadProvisionCard(); };
   document.getElementById('wh_save').onclick = saveWebhook;
   document.getElementById('wh_gw_test').onclick = function () { testWebhook('gateway'); };
   document.getElementById('wh_node_test').onclick = function () { testWebhook('node'); };
+  document.getElementById('pv_save').onclick = saveProvisionInterval;
+  document.getElementById('pv_rescan').onclick = doFullRescan;
   loadNodes();
   // 进入页面后自动刷新（15s），离开节点页时由 showSection 清除定时器
-  window._nodesTimer = setInterval(function () { if (CURRENT === 'nodes') loadNodes(); }, 15000);
+  window._nodesTimer = setInterval(function () {
+    if (CURRENT === 'nodes') { loadNodes(); loadProvisionCard(); }
+  }, 15000);
+}
+
+// ---- 多节点下发同步卡片 ----
+function renderProvisionCard(cfg) {
+  const seq = document.getElementById('pv_seq');
+  if (!seq) return;
+  seq.textContent = cfg.provision_seq != null ? cfg.provision_seq : '—';
+  let pending = [];
+  try { pending = JSON.parse(cfg.provision_pending || '[]') || []; } catch (e) { pending = []; }
+  document.getElementById('pv_wait').textContent = pending.length;
+  document.getElementById('pv_wait').title = pending.join(', ');
+  document.getElementById('pv_iv').textContent = cfg.provision_sync_interval || '5';
+  const iv = document.getElementById('pv_interval');
+  if (iv && document.activeElement !== iv) iv.value = cfg.provision_sync_interval || '5';
+}
+
+function loadProvisionCard() {
+  if (!document.getElementById('pv_seq')) return;
+  api('/api/sys-config').then(function (cfg) { renderProvisionCard(cfg || {}); }).catch(function () {});
+}
+
+function saveProvisionInterval() {
+  const el = document.getElementById('pv_interval');
+  const msg = document.getElementById('pv_msg');
+  const v = Number(el.value);
+  if (!v || v < 5) { toast('轮询周期不得小于 5 秒', true); return; }
+  api('/api/sys-config', 'PUT', { provision_sync_interval: v }).then(function () {
+    msg.textContent = '已保存，下个周期生效';
+    setTimeout(function () { msg.textContent = ''; }, 2500);
+    loadProvisionCard();
+  }).catch(function (e) { msg.textContent = '保存失败：' + e.message; });
+}
+
+function doFullRescan() {
+  const btn = document.getElementById('pv_rescan');
+  const msg = document.getElementById('pv_msg');
+  btn.disabled = true;
+  msg.textContent = '正在通知所有节点…';
+  api('/api/provision/resync-all', 'POST', {}).then(function (r) {
+    msg.textContent = '已触发（版本号 ' + (r && r.seq) + '）';
+    toast('已触发全节点重扫');
+    setTimeout(loadProvisionCard, 1500);
+  }).catch(function (e) {
+    msg.textContent = '触发失败：' + e.message;
+    toast('触发失败：' + e.message, true);
+  }).then(function () { btn.disabled = false; });
 }
 
 function loadNodes() {

@@ -46,6 +46,10 @@ KEY_INTERVAL = "provision_sync_interval"
 DEFAULT_SYNC_INTERVAL = 5
 _MAX_PENDING_JSON = 480  # system_setting.value 是 varchar(512)
 
+# 当前进程的 watcher 实例（由 start_provision_watcher 赋值）：
+# force_all_nodes_rescan 需要把它的位点对齐，避免本节点刚全量重建完又被自己触发一次。
+_WATCHER = None
+
 
 def _sys_setting():
     """延迟 import，避免与 db.session 的启动期迁移互相拖累。"""
@@ -170,6 +174,76 @@ def remove_xml(n):
         return False
 
 
+def rescan_all(prof=PROF):
+    """全量重建**本节点**的落地网关：逐个 killgw 后统一 rescan 一次。
+
+    为什么不是只 `rescan`：`sofia profile rescan` 对已存在的 gateway 无效（PITFALLS #30），
+    想真正重建必须先把旧对象 kill 掉。用于「立即全节点重扫」按钮与人工兜底。
+    """
+    names = local_gateway_names()
+    log.info("rescan_all: rebuild %d gateway(s) on this node: %s", len(names), names)
+    return resync(names, prof=prof)
+
+
+def local_gateway_names():
+    """本节点可见的落地网关名（与 fs_sofia_config._gateways_block 同一套过滤规则）。
+
+    注册型(1) 只取归属本 NODE_UUID 的；点对点(0) 全量。
+    """
+    try:
+        from sqlalchemy import select
+        from db.session import SessionLocal
+        from db.models import Gateway, GatewayNode
+        from core.config import NODE_UUID
+    except ImportError:  # pragma: no cover
+        from src.db.session import SessionLocal  # type: ignore
+        from src.db.models import Gateway, GatewayNode  # type: ignore
+        from src.core.config import NODE_UUID  # type: ignore
+        from sqlalchemy import select  # type: ignore
+    db = SessionLocal()
+    try:
+        if NODE_UUID:
+            mine = set(db.scalars(select(GatewayNode.gateway_id).where(
+                GatewayNode.node_uuid == NODE_UUID)).all())
+        else:
+            mine = set()
+        out = []
+        for g in db.scalars(select(Gateway)).all():
+            if int(getattr(g, "auth_type", 0) or 0) == 1 and g.id not in mine:
+                continue
+            out.append(g.name)
+        return out
+    except Exception as e:
+        log.warning("list local gateways failed: %s", e)
+        return []
+    finally:
+        db.close()
+
+
+def force_all_nodes_rescan():
+    """「立即全节点重扫」：让**所有**节点立刻全量重建落地网关。
+
+    做法：bump `provision_seq` 并把 `provision_pending` 清空 —— 各节点的
+    ProvisionWatcher 看到 seq 变化且名单为空，就退化成一次全量 rescan（见 _sync_once）；
+    本节点则**立即**执行，不等轮询周期。
+
+    :return: 新的 provision_seq
+    """
+    ss = _sys_setting()
+    seq = ss.get_int_setting(KEY_SEQ, 0) + 1
+    ss.set_setting(KEY_SEQ, str(seq), "网关下发变更版本号(每次增删改+1，各节点据此补扫)")
+    ss.set_setting(KEY_PENDING, "[]", "最近变更的网关名 JSON 数组(供各节点精确 killgw)")
+    try:
+        rescan_all()
+    except Exception as e:
+        log.warning("local full rescan failed: %s", e)
+    if _WATCHER is not None:
+        # 本节点刚做过全量重建，把位点对齐，避免 watcher 下一轮再重复扫一次
+        _WATCHER._last_seq = seq
+    log.info("force_all_nodes_rescan: seq=%s (local rebuilt immediately)", seq)
+    return seq
+
+
 class ProvisionWatcher:
     """监听 DB 中的网关下发变更，对本节点 FS 补做 killgw + rescan。
 
@@ -215,9 +289,11 @@ class ProvisionWatcher:
             log.info("[PS] seq %s -> %s: resync %s", self._last_seq, seq, pending)
             resync(pending)
         else:
-            # 没有精确名单（如 pending 被裁剪清空）：退化为全量 rescan
-            log.info("[PS] seq %s -> %s: full rescan (no pending names)", self._last_seq, seq)
-            rescan()
+            # 没有精确名单（「立即全节点重扫」会显式清空 pending）：做**全量重建**。
+            # 注意不能退化成裸 rescan —— rescan 对已存在的 gateway 无效（PITFALLS #30），
+            # 那样点一下按钮等于什么都没发生。
+            log.info("[PS] seq %s -> %s: full rebuild (no pending names)", self._last_seq, seq)
+            rescan_all()
         self._last_seq = seq
 
     def _run(self):
@@ -231,6 +307,8 @@ class ProvisionWatcher:
 
 
 def start_provision_watcher(interval: int = DEFAULT_SYNC_INTERVAL) -> "ProvisionWatcher":
+    global _WATCHER
     w = ProvisionWatcher(interval=interval)
     w.start()
+    _WATCHER = w  # 供 force_all_nodes_rescan 对齐位点（避免本节点重复全量重扫）
     return w

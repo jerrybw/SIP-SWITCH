@@ -87,3 +87,16 @@ tr:hover td { background: #fafbff; }
 .badge-on { background: #e6f7ec; color: #1a9e54; }
 .badge-off { background: #fdecea; color: #d8392b; }
 .badge-warn { background: #fff4e0; color: #c77700; }
+.badge-fail { background: #f3e8ff; color: #8347d6; }
+/* 多节点下发同步卡片（节点状态页顶部，显眼） */
+.prov-card { background: linear-gradient(135deg, #eef2ff 0%, #f7f9ff 60%, #fff 100%);
+  border: 1px solid #ccd6ff; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px;
+  box-shadow: 0 2px 10px rgba(64,96,255,.10); flex-shrink: 0; }
+.prov-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.prov-title { font-size: 16px; font-weight: 700; color: #23306b; }
+.prov-sub { font-size: 12px; color: #6b78a8; margin-top: 3px; }
+.prov-stats { display: flex; gap: 26px; margin: 14px 0 10px; flex-wrap: wrap; }
+.prov-stat b { display: block; font-size: 22px; line-height: 1.15; color: #2a3bd0; }
+.prov-stat span { font-size: 12px; color: #6b78a8; }
+.prov-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: #4b5563; }
+.prov-foot label { font-weight: 600; }

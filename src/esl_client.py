@@ -180,6 +180,7 @@ def _debug_dump(leg_uuid, rec, event):
 def handle_event(event) -> None:
     if event.getHeader("Event-Name") == "CUSTOM":
         _handle_sofia_reg(event)
+        _handle_gateway_state(event)
         return
     etype = event.getHeader("Event-Name")
     # 用 Unique-ID 作为通道唯一键（最可靠），variable_call_uuid 仅兜底。
@@ -579,7 +580,7 @@ class ESLClient:
         EVENT_SUB = (
             "CHANNEL_CREATE CHANNEL_PROGRESS CHANNEL_PROGRESS_MEDIA "
             "CHANNEL_ANSWER CHANNEL_BRIDGE CHANNEL_HANGUP_COMPLETE "
-            "CUSTOM sofia::register sofia::expire"
+            "CUSTOM sofia::register sofia::expire sofia::gateway_state"
         )
         # 自愈参数：周期重订阅间隔 / 无事件看门狗阈值（秒）。
         RESUB_INTERVAL = 60
@@ -1169,6 +1170,22 @@ def start_cdr_reaper(interval=30):
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
     print('[CDR] reaper started, interval=%ss' % interval)
+
+
+def _handle_gateway_state(event) -> None:
+    """落地网关注册状态回写（CUSTOM sofia::gateway_state）。
+
+    实测报文头是 `Gateway` / `State`（不是 Gateway-Name / Gateway-State），
+    翻译与落库逻辑见 gw_state.py（含「只对注册型网关生效」的原因）。
+    """
+    try:
+        try:
+            from gw_state import handle_event as _gw_handle
+        except ImportError:  # pragma: no cover
+            from src.gw_state import handle_event as _gw_handle
+        _gw_handle(event)
+    except Exception as e:
+        print("[gw-state] handler failed:", e, flush=True)
 
 
 def _handle_sofia_reg(event) -> None:

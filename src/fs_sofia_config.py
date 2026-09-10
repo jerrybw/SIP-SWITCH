@@ -36,6 +36,24 @@ def _read(path):
         return ""
 
 
+def _int_or(v, default, lo, hi):
+    """安全取整并夹到 [lo, hi]：DB 里可能有 NULL/0/异常值，不能让 FS 收到非法参数。
+
+    0 或负数视为「未配置」→ 回默认值（表单把数字框清空会提交 0）。
+    """
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = default
+    if n <= 0:
+        n = default
+    if n < lo:
+        n = lo
+    if n > hi:
+        n = hi
+    return n
+
+
 def _gateway_xml(gw):
     """单条落地网关 XML（与旧 fs_provision.bgw 完全一致，仅去 <include> 包裹）。"""
     p = "{}:{}".format(gw.ip, gw.port or 5060)
@@ -43,16 +61,27 @@ def _gateway_xml(gw):
     reg = "false" if st != 1 else ("true" if int(getattr(gw, "auth_type", 0) or 0) == 1 else "false")
     u = getattr(gw, "username", None) or gw.name
     w = getattr(gw, "password", None) or ""
-    return (
+    out = (
         '    <gateway name="%s">\n' % gw.name
         + '      <param name="proxy" value="%s"/>\n' % p
         + '      <param name="realm" value="%s"/>\n' % p
         + '      <param name="register" value="%s"/>\n' % reg
         + '      <param name="username" value="%s"/>\n' % u
         + '      <param name="password" value="%s"/>\n' % w
-        + '      <param name="caller-id-in-from" value="true"/>\n'
-        + '    </gateway>'
     )
+    if reg == "true":
+        # 注册型网关才下发注册参数（点对点网关不注册，写了是噪音）：
+        #   expire-seconds 注册有效期(秒)，FS 在到期前自动续注册
+        #   retry-seconds  注册失败后的重试间隔(秒)
+        # ⚠️ 不下发时 FS 用自身默认 expire 3600（实测 Expires/Freq 均为 3600），
+        #    因此该项从「无」到「有」会让 FS 的实际注册周期变短，属预期行为。
+        out += '      <param name="expire-seconds" value="%d"/>\n' % _int_or(
+            getattr(gw, "register_expire", None), 600, 60, 86400)
+        out += '      <param name="retry-seconds" value="%d"/>\n' % _int_or(
+            getattr(gw, "register_retry", None), 30, 5, 3600)
+    out += ('      <param name="caller-id-in-from" value="true"/>\n'
+            + '    </gateway>')
+    return out
 
 
 def _gateways_block(db):

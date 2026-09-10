@@ -104,6 +104,17 @@ class Gateway(Base):
     # v0.3 成本侧：网关级成本费率（元/成本计费单位），优先于运营商级。
     cost_rate = mapped_column(Numeric(10, 4))
     status = mapped_column(SmallInteger, default=1)
+    # ---- 注册型网关：注册参数 + 实时注册状态（2026-09-10）----
+    # 注册有效期(秒)：下发为 <param name="expire-seconds">；FS 会在到期前自动续注册。
+    # 历史行为：不下发时 FS 用自身默认 3600（实测 Expires/Freq 都是 3600）。
+    register_expire = mapped_column(Integer, default=600)
+    # 注册失败后的重试间隔(秒)：下发为 <param name="retry-seconds">。
+    register_retry = mapped_column(Integer, default=30)
+    # 当前注册状态：0 未注册 / 1 已注册 / 2 注册中 / 3 注册失败。
+    # 由 ESL `CUSTOM sofia::gateway_state` 事件回写（见 gw_state.py），点对点网关恒为 0。
+    register_status = mapped_column(SmallInteger, default=0)
+    # 最后一次状态变更时间（UTC），供判断状态新鲜度。
+    register_status_at = mapped_column(DateTime)
     created_at = mapped_column(DateTime)
     updated_at = mapped_column(DateTime)
 

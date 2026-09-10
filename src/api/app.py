@@ -179,6 +179,20 @@ async def webhook_test(request: Request):
     return {"results": results}
 
 
+@app.post("/api/provision/resync-all")
+def provision_resync_all():
+    """「立即全节点重扫」：让所有 FS 节点全量重建落地网关（killgw + rescan）。
+
+    - 本节点：立刻执行（不等轮询周期）
+    - 其它节点：经 DB `provision_seq` 变化 + 空 pending 名单，退化为全量 rescan，
+      最迟一个 `provision_sync_interval` 后完成。
+    """
+    from fs_provision import force_all_nodes_rescan
+    seq = force_all_nodes_rescan()
+    return {"ok": True, "seq": seq,
+            "note": "本节点已立即重建；其它节点最迟一个轮询周期后跟上"}
+
+
 app.include_router(auth_router)
 app.include_router(billing_router)
 app.include_router(accounts_router)

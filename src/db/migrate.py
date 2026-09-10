@@ -305,6 +305,25 @@ def ensure_gateway_heartbeat_fail_count_column(engine) -> None:
         conn.commit()
 
 
+def ensure_gateway_register_columns(engine) -> None:
+    """注册型落地网关：注册有效期/重试间隔/当前注册状态列（幂等）。
+
+    - register_expire  默认 600（此前不下发时 FS 用自身默认 3600）
+    - register_retry   默认 30
+    - register_status  默认 0（未注册），由 sofia::gateway_state 事件回写
+    - register_status_at 最后一次状态变更时间
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        _add_cols(conn, [
+            ("gateway", "register_expire", "INT NOT NULL DEFAULT 600"),
+            ("gateway", "register_retry", "INT NOT NULL DEFAULT 30"),
+            ("gateway", "register_status", "SMALLINT NOT NULL DEFAULT 0"),
+            ("gateway", "register_status_at", "DATETIME(3) DEFAULT NULL"),
+        ])
+
+
 def ensure_billing_columns(engine) -> None:
     """T-计费：补齐费率列(account/access_point/sip_phone.rate)与消费列(cdr.cost/rate_used)。幂等。"""
     if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":

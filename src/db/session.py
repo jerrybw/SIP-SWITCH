@@ -27,6 +27,7 @@ from db.migrate import ensure_gateway_failover_pre_ring_only_column  # noqa: E40
 from db.migrate import ensure_sip_phone_enabled_column  # noqa: E402
 from db.migrate import ensure_cdr_hangup_direction_column  # noqa: E402
 from db.migrate import ensure_gateway_heartbeat_fail_count_column  # noqa: E402
+from db.migrate import ensure_gateway_register_columns  # noqa: E402
 from db.migrate import ensure_billing_columns, ensure_cdr_uuid_unique  # noqa: E402
 # v0.3 多租户 / 成本 / 预付费
 from db.migrate import ensure_multitenant_columns, ensure_cost_columns, ensure_account_ledger_table  # noqa: E402
@@ -53,6 +54,8 @@ ensure_gateway_failover_pre_ring_only_column(_write_engine)
 ensure_sip_phone_enabled_column(_write_engine)
 ensure_cdr_hangup_direction_column(_write_engine)
 ensure_gateway_heartbeat_fail_count_column(_write_engine)
+# 注册型网关：注册有效期/重试间隔/当前注册状态（幂等）
+ensure_gateway_register_columns(_write_engine)
 ensure_billing_columns(_write_engine)
 ensure_cdr_uuid_unique(_write_engine)
 # v0.3：多租户列 + 成本列 + 流水表。⚠️ 号码迁移 migrate_phone_numbers 不在此自动执行——

@@ -49,7 +49,9 @@ EDITABLE = {
                  "concurrent_limit", "heartbeat_enabled", "heartbeat_interval",
                  "heartbeat_timeout", "switch_mode", "switch_timeout", "switch_codes",
                  # v0.3 成本侧：落地网关的成本计费单位(秒)与成本费率(元/成本计费单位)
-                 "failover_pre_ring_only", "status", "bill_unit", "cost_rate"],
+                 "failover_pre_ring_only", "status", "bill_unit", "cost_rate",
+                 # 注册型网关的下发参数（当前注册状态由 ESL 事件回写，不可手改）
+                 "register_expire", "register_retry"],
     "prefix-routes": ["gateway_id", "prefix", "priority", "status"],
     "rules": ["owner_type", "owner_id", "direction", "act", "pattern", "replace_to"],
     # v0.3 多租户：account_id 为话机归属（必选），号码受租户号段约束
@@ -184,6 +186,10 @@ def _sync_gateway_node(db: Session, gw, data: dict, is_create: bool) -> None:
         gn = db.scalar(select(GatewayNode).where(GatewayNode.gateway_id == gw.id))
         if gn:
             db.delete(gn)
+        # 点对点网关不注册：把遗留的注册状态清零（否则切模式后残留「已注册」误导排障）
+        if int(getattr(gw, "register_status", 0) or 0) != 0:
+            gw.register_status = 0
+            gw.register_status_at = _now()
 
 
 def _enrich_gateway_node(db: Session, items: list) -> list:
