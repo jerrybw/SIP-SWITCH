@@ -46,7 +46,8 @@ const SECTIONS = {
         hint: '出局目标地址：IPv4 / IPv6 / 域名，不含端口（端口填下方「端口」）' },
       { k: 'port', label: '端口', type: 'number', def: 5060 },
       { k: 'auth_type', label: '对接模式', type: 'select', options: [{ v: 0, t: '点对点' }, { v: 1, t: '注册' }] },
-      { k: 'node_uuid', label: '归属节点', type: 'select-src', src: '/api/nodes', optk: 'node_uuid', optt: 'name',
+      { k: 'node_uuid', label: '归属节点', type: 'select-src', src: '/api/nodes', optk: 'node_uuid', optt: 'host',
+        listKey: 'node_name', emptyText: '全量',
         requiredIf: { k: 'auth_type', v: '1' },
         hint: '注册模式：只下发给所选节点（单选）；点对点模式全量下发所有节点，无需选择' },
       { k: 'username', label: '账号', type: 'text' },
@@ -356,7 +357,9 @@ function textOf(field, value) {
     if (value === null || value === undefined || value === '') return '<span class="muted">—</span>';
     return fmtBJ(value);
   }
-  if (value === null || value === undefined || value === '') return '<span class="muted">—</span>';
+  if (value === null || value === undefined || value === '') {
+    return '<span class="muted">' + (field.emptyText || '—') + '</span>';
+  }
   if (field.options) {
     const o = field.options.find(function (x) { return String(x.v) === String(value); });
     if (o) return o.t;
@@ -438,7 +441,7 @@ function renderTable(key, rows, st) {
     rows.forEach(function (r) {
       html += '<tr>';
       if (sec.showId) html += '<td>' + (r.id !== undefined && r.id !== null ? r.id : '') + '</td>';
-      sec.fields.forEach(function (f) { html += '<td>' + textOf(f, r[f.k]) + '</td>'; });
+      sec.fields.forEach(function (f) { html += '<td>' + textOf(f, r[f.listKey || f.k]) + '</td>'; });
       (sec.specials || []).forEach(function (sp) {
         if (sp === 'prefixes') {
           const pfx = (r._prefixes && r._prefixes.length) ? r._prefixes.join(',') : '';

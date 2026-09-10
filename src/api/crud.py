@@ -187,6 +187,7 @@ def _sync_gateway_node(db: Session, gw, data: dict, is_create: bool) -> None:
 
 
 def _enrich_gateway_node(db: Session, items: list) -> list:
+    from db.models import FsNode  # noqa: F401  (#64: join 取归属节点名)
     """把 gateway_node.node_uuid 回填进网关 dict（列表/单条共用，单次查询）。"""
     if not items:
         return items
@@ -194,12 +195,17 @@ def _enrich_gateway_node(db: Session, items: list) -> list:
     if not ids:
         return items
     rows = db.execute(
-        select(GatewayNode.gateway_id, GatewayNode.node_uuid)
+        select(GatewayNode.gateway_id, GatewayNode.node_uuid, FsNode.host, FsNode.name)
+        .outerjoin(FsNode, FsNode.node_uuid == GatewayNode.node_uuid)
         .where(GatewayNode.gateway_id.in_(ids))
     ).all()
-    m = {r[0]: r[1] for r in rows}
+    # fs_node.name = socket.gethostname()（容器里是短 ID，不可读）；host 才是可读节点名
+    m = {r[0]: (r[1], (r[2] or r[3])) for r in rows}
     for it in items:
-        it["node_uuid"] = m.get(it["id"])
+        v = m.get(it["id"])
+        it["node_uuid"] = v[0] if v else None
+        # 列表展示用：注册型=节点名(host)，点对点(无归属行)=None -> 前端显示「全量」
+        it["node_name"] = v[1] if v else None
     return items
 
 
