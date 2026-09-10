@@ -64,12 +64,12 @@ def evaluate_call_scoped(db, owner_type: int, owner_id: int,
     return True, None, None
 
 
-# ---- 号码变换（§2.5.1：子串替换，不复用 matcher 全串锚定）----
+# ---- 号码变换（§2.5.1：号首前缀匹配，不复用 matcher 全串锚定）----
 import re as _re
 
 
 def _translate_pattern_to_regex(pattern: str):
-    """变换专用：* → (.*) 捕获组；? → . 单字符；其余字面转义（不锚定，子串匹配）。"""
+    """变换专用：* → (.*) 捕获组；? → . 单字符；其余字面转义（^ 前缀锚定，仅匹配号首，不再子串命中）。"""
     buf = []
     for ch in pattern:
         if ch == "*":
@@ -78,11 +78,11 @@ def _translate_pattern_to_regex(pattern: str):
             buf.append(".")
         else:
             buf.append(_re.escape(ch))
-    return _re.compile("".join(buf), _re.DOTALL)
+    return _re.compile("^" + "".join(buf), _re.DOTALL)
 
 
 def _apply_one(number: str, rule: Rule) -> str:
-    """对单条 translate 规则做子串替换：命中首个子串即替换（count=1）。
+    """对单条 translate 规则做前缀替换：仅当号首命中 pattern 时替换（^ 锚定）。
 
     replace_to 中 ``*`` 引用捕获片段；空 replace_to = 删除匹配到的前缀。
     """

@@ -189,3 +189,7 @@
 | `P0-pure-socket-esl-and-concurrency-failclose.md`（v1.4） | P0/P2 详细设计；D7/D8 决策（事项 `rE5ICg`） |
 | `设计方案-接入点落地网关Web与限制逻辑落地` / `计费方案设计_v0.3` / `T301_鉴权设计方案` | 各模块设计 |
 | `复盘纪要-*` / `部署runbook-2C2G开发机` | 复盘与部署 |
+## 2026-09-10 修复记录（dev 验证通过，已推送）
+
+- **fix: CDR `fs_node_uuid` 落库取 `NODE_UUID`**（关联 #69 节点健康/CDR 关联）：原 `_save_cdr` 取 `ESL_CFG.get("fs_node_uuid")`，而配置 `esl.fs_node_uuid` 为空（死字段），导致所有 CDR `fs_node_uuid=null`、前端「FS节点」列无值。改为取 `core.config.NODE_UUID`（与 `node_health` 自注册同源）。`pre_insert_cdr` 半成品不填，但 HANGUP 路径 `_save_cdr` 经 `_persist_cdr` 整行 upsert 覆盖，故终态带值。验证：rebuild gateway 后新呼叫 `fs_node_uuid` 均带 NODE_UUID。
+- **fix: 主被叫变换规则 `pattern` 前缀锚定**（用户需求）：原 `_translate_pattern_to_regex` 编译未加 `^`，`C?1` 会子串命中 `ccc1` 的 2-3 位；现加 `^` 前缀锚定，仅号首匹配。验证：容器内 `_apply_one` 实测 `ccc1` 不命中、`c11aa/cc143/cb12334` 前缀命中（命中后整体前缀替换为 replace_to、保留后缀）。

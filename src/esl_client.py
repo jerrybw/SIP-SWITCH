@@ -20,7 +20,7 @@ from decimal import Decimal
 
 from fs_esl_socket import ESLConnection as ESLconnection
 
-from core.config import settings
+from core.config import settings, NODE_UUID
 from db.session import SessionLocal
 from db.models import Cdr, SipPhone, AccessPoint, Account, Business, Gateway, Carrier, AccountLedger, CarrierLedger
 from sqlalchemy import select, update
@@ -536,7 +536,7 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         # billed 列 NOT NULL DEFAULT 0；显式传 0，避免 getattr 未赋值时为 None → IntegrityError(1048)，
         # 导致 _persist_cdr 全列构造 vals 时把 None 写进 INSERT（DEFAULT 仅在列被省略时生效）。
         billed=0,
-        fs_node_uuid=ESL_CFG.get("fs_node_uuid"),
+        fs_node_uuid=NODE_UUID,
         # 终态覆盖 created_at：以落终态的当前时间写入（用户预期；不再沿用阶段①的呼叫起始时间，
         # 否则 created_at 会早于挂断时间）。upsert 的 ON DUPLICATE KEY UPDATE 已放开 created_at 列。
         created_at=datetime.utcnow(),
