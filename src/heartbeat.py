@@ -10,7 +10,8 @@
 区分不了单 trunk 是否真能呼出，故以 IP 为准。
 
 防抖：连续 FAIL_THRESHOLD 次失败才置离线；任一次成功立即恢复（纳回）。
-仅打日志（不接外部告警）。
+#69 起：上下线翻转时调用 alerting.alert_if_changed 落 operation_log（状态未变去重），
+闭环坑位 #18「心跳告警未闭环」；仍只落库，不接外部通道（后续可从 operation_log 消费）。
 """
 import socket
 import threading
@@ -21,6 +22,7 @@ from sqlalchemy import select
 
 from db.session import SessionLocal
 from db.models import Gateway
+from alerting import alert_if_changed
 
 FAIL_THRESHOLD = 3        # 连续失败达到此值才判离线
 DEFAULT_INTERVAL = 30     # 探测周期(秒)，用户确认 30s
@@ -92,6 +94,9 @@ def _probe_once(db) -> None:
             if alive:
                 if g.heartbeat_status != 1 or (g.heartbeat_fail_count or 0) != 0:
                     print("[HB] gateway %s (%s:%d) UP" % (g.name, ip, port))
+                    alert_if_changed("gateway_up", "gateway", g.id, {
+                        "name": g.name, "ip": ip, "port": port,
+                    }, level="info")
                 g.heartbeat_status = 1
                 g.heartbeat_fail_count = 0
             else:
@@ -100,6 +105,10 @@ def _probe_once(db) -> None:
                     if g.heartbeat_status != 0:
                         print("[HB] gateway %s (%s:%d) DOWN after %d fails"
                               % (g.name, ip, port, g.heartbeat_fail_count))
+                        alert_if_changed("gateway_down", "gateway", g.id, {
+                            "name": g.name, "ip": ip, "port": port,
+                            "fail_count": g.heartbeat_fail_count,
+                        })
                     g.heartbeat_status = 0
                 elif g.heartbeat_fail_count == 1:
                     print("[HB] gateway %s (%s:%d) probe fail #%d (debouncing)"

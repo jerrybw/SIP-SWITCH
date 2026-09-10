@@ -214,6 +214,12 @@ class FsNode(Base):
     esl_port = mapped_column(Integer, default=8021)
     status = mapped_column(SmallInteger, default=1)
     last_health_time = mapped_column(DateTime)
+    # ---- #69 FS 节点健康检查（DEP-6）----
+    last_heartbeat_at = mapped_column(DateTime)          # 最后一次探测成功时间
+    last_concurrency = mapped_column(Integer, default=0)  # 最近并发数（show calls）
+    last_reg_count = mapped_column(Integer, default=0)    # 最近注册分机数
+    max_concurrency = mapped_column(Integer)              # NULL = 回落 system_setting
+    fail_count = mapped_column(SmallInteger, default=0)   # 连续失败次数（防抖）
     created_at = mapped_column(DateTime)
 
 

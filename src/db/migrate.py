@@ -174,6 +174,10 @@ def ensure_system_setting_defaults(engine) -> None:
     defaults = (
         ("phone_sync_interval", "30", "话机注册状态同步间隔(秒)"),
         ("ap_sync_interval", "30", "接入点注册状态同步间隔(秒)"),
+        # #69 FS 节点健康检查（第2类，热生效；节点列 fs_node.max_concurrency 优先）
+        ("node_health_interval", "30", "FS 节点健康检查周期(秒)"),
+        ("node_health_fail_threshold", "3", "FS 节点连续失败判离线阈值(次)"),
+        ("node_max_concurrency", "0", "FS 节点并发上限全局默认(0=不限制)"),
     )
     with engine.connect() as conn:
         for k, v, d in defaults:
@@ -750,3 +754,26 @@ def ensure_account_customer_id_nullable(engine) -> None:
         ))
         conn.commit()
         print("[migrate] account.customer_id -> NULLABLE")
+
+
+def ensure_fs_node_health_columns(engine) -> None:
+    """#69 FS 节点级健康检查（DEP-6）：补齐 fs_node 健康字段。幂等。
+
+    字段用途：
+      last_heartbeat_at  最后一次探测成功时间（判定离线/恢复的依据）
+      last_concurrency   最近一次并发数（来自 `show calls`）
+      last_reg_count     最近一次注册分机数（来自 `sofia status profile ... reg`）
+      max_concurrency    本节点并发上限；NULL = 回落第2类 system_setting.node_max_concurrency
+      fail_count         连续失败次数（防抖；成功即清零）
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    adds = [
+        ("fs_node", "last_heartbeat_at", "DATETIME(3)"),
+        ("fs_node", "last_concurrency", "INT NOT NULL DEFAULT 0"),
+        ("fs_node", "last_reg_count", "INT NOT NULL DEFAULT 0"),
+        ("fs_node", "max_concurrency", "INT"),
+        ("fs_node", "fail_count", "SMALLINT NOT NULL DEFAULT 0"),
+    ]
+    with engine.connect() as conn:
+        _add_cols(conn, adds)

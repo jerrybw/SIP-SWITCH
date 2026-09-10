@@ -150,6 +150,27 @@ dev 现有 `gw-carrier-a`（`id=7`，`ip=sipp-stub`，`port=5060`）实测 **`au
 
 **已知关联**：`esl_client.py` 现为单节点单例连接，Phase 2 需改为按节点建连的连接池（见 §7）。
 
+#### 3.5.1 落地状态（#69 ✅，2026-09-10）
+
+| 设计项 | 落地 |
+|---|---|
+| 探测者 = 网关侧 | `src/node_health.py`，`main.py` 起 `NodeHealthProber` 守护线程 |
+| 探测手段 | ESL 短连接 + `api show calls`（并发）+ `api sofia status profile internal reg`（注册数） |
+| 扩列 | `fs_node`: `last_heartbeat_at` / `last_concurrency` / `last_reg_count` / `max_concurrency` / `fail_count` |
+| 节点从哪来 | **自注册 upsert**（按第1类 `NODE_UUID`），无需手工建；多节点各自上报 |
+| 判定 | 连续 `node_health_fail_threshold`(默认 3) 次失败 → `offline(0)`；并发 ≥ 上限 → `overload(2)`；否则 `online(1)` |
+| 阈值来源 | `fs_node.max_concurrency` 列优先，NULL 回落第2类 `system_setting.node_max_concurrency`（0=不限） |
+| 周期/阈值热生效 | `node_health_interval`(30) / `node_health_fail_threshold`(3) / `node_max_concurrency`(0)，每轮重读 |
+| 告警 | `src/alerting.py::alert_if_changed` → `operation_log`（`operator=system`），**状态变化才写**避免刷屏 |
+| Phase 1 不摘除 | 仅记录+告警；Phase 2 再由选路按 node 过滤消费 `fs_node.status` |
+
+**顺带闭环坑位 #18**：`heartbeat.py`（落地网关 UDP OPTIONS 探测）上下线翻转改为调用同一告警出口，
+写 `operation_log` 的 `gateway_down` / `gateway_up`，不再是只 `print`。
+
+⚠️ **告警必须独立事务**：`alert_if_changed` 自建 session 并 commit，不复用调用方 `db` ——
+否则告警落库失败会连带 `rollback` 掉调用方的状态更新（实测踩过：状态改了却被回滚成原值）。
+另：`operation_log.created_at` 是 NOT NULL 且模型无 default，必须显式赋值，否则 SQLAlchemy 显式插 NULL 报 1048。
+
 ---
 
 ## 4. 三类配置文件
