@@ -37,7 +37,7 @@ from db.migrate import ensure_carrier_balance_columns, ensure_carrier_ledger_tab
 from db.migrate import ensure_validation_constraints, ensure_endpoint_host_columns  # noqa: E402
 from db.migrate import ensure_account_customer_id_nullable  # noqa: E402
 # #69 FS 节点健康检查（DEP-6）
-from db.migrate import ensure_fs_node_health_columns  # noqa: E402
+from db.migrate import ensure_fs_node_health_columns, ensure_provision_sync_settings  # noqa: E402
 from db.migrate import ensure_gateway_node_table  # noqa: E402
 
 ensure_rule_act_column(_write_engine)
@@ -70,6 +70,7 @@ ensure_endpoint_host_columns(_write_engine)
 ensure_account_customer_id_nullable(_write_engine)
 # #69：fs_node 健康字段（幂等）
 ensure_fs_node_health_columns(_write_engine)
+ensure_provision_sync_settings(_write_engine)
 ensure_gateway_node_table(_write_engine)
 from db.migrate import ensure_gateway_node_backfill
 ensure_gateway_node_backfill(_write_engine)

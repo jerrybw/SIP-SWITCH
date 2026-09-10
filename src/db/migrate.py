@@ -847,3 +847,23 @@ def ensure_gateway_node_backfill(engine) -> None:
             _lg.getLogger("migrate").info(
                 "gateway_node backfill: %d 个存量注册网关回填到节点 %s", res.rowcount, node_uuid)
         conn.commit()
+
+
+def ensure_provision_sync_settings(engine) -> None:
+    """多节点网关下发同步用到的第2类配置种子（幂等）。"""
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    defaults = (
+        ("provision_seq", "0", "网关下发变更版本号(每次增删改+1，各节点据此补扫)"),
+        ("provision_pending", "[]", "最近变更的网关名 JSON 数组(供各节点精确 killgw)"),
+        ("provision_sync_interval", "5", "多节点下发同步轮询周期(秒，改后热生效)"),
+    )
+    with engine.connect() as conn:
+        for k, v, d in defaults:
+            _sel = "SELECT 1 FROM system_setting WHERE `key` = :k"
+            if conn.execute(text(_sel), {"k": k}).scalar() is not None:
+                continue
+            _ins = ("INSERT INTO system_setting (`key`, `value`, description, updated_at) "
+                    "VALUES (:k, :v, :d, NOW())")
+            conn.execute(text(_ins), {"k": k, "v": v, "d": d})
+        conn.commit()

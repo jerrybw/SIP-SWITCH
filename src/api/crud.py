@@ -506,6 +506,8 @@ async def update_entity(entity: str, item_id: int, request: Request, db: Session
     obj = db.get(MODEL[entity], item_id)
     if obj is None:
         raise HTTPException(status_code=404, detail="not found")
+    # 网关改名场景：记住旧名，让其它节点也能 killgw 掉旧对象（见 fs_provision.provision）
+    _gw_old_name = getattr(obj, "name", None) if entity == "gateways" else None
     data = await request.json()
     _reject_global_translate(data)
     if entity == "sip-phones":
@@ -546,7 +548,7 @@ async def update_entity(entity: str, item_id: int, request: Request, db: Session
             raise HTTPException(status_code=400, detail=f"gateway node sync failed: {e}")
     if entity=="gateways" and provision is not None:
         try:
-            _pv=provision(obj)
+            _pv=provision(obj, old_name=_gw_old_name)
             log.info("auto-provision gateway %s: %s",obj.name,_pv)
         except Exception as _e:
             log.error("auto-provision gateway %s failed: %s",getattr(obj,"name",None),_e)
