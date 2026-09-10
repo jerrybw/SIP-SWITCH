@@ -811,3 +811,39 @@ def ensure_gateway_node_table(engine) -> None:
         )
         conn.execute(text(ddl))
         conn.commit()
+
+
+def ensure_gateway_node_backfill(engine) -> None:
+    """#64：存量注册型网关(auth_type=1)无归属行时，回填到最小 id 的 fs_node。
+
+    背景：provisioning 改为「按 NODE_UUID 过滤」后，注册型网关必须有关联行才会下发。
+    存量数据（升级前创建的注册型网关）没有归属行 → 会从所有节点消失，既有话务中断。
+    故启动时把这类网关统一回填到「第一个 fs_node」（原单节点部署的主节点），
+    保证升级后既有注册网关仍挂在原节点；新网关一律由前端表单显式选择节点。
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        exists = conn.execute(text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = 'gateway_node'"
+        )).scalar() is not None
+        if not exists:
+            return
+        row = conn.execute(text(
+            "SELECT node_uuid FROM fs_node ORDER BY id ASC LIMIT 1"
+        )).first()
+        if not row or not row[0]:
+            return
+        node_uuid = row[0]
+        res = conn.execute(text(
+            "INSERT INTO gateway_node (gateway_id, node_uuid) "
+            "SELECT g.id, :nu FROM gateway g "
+            "LEFT JOIN gateway_node gn ON gn.gateway_id = g.id "
+            "WHERE g.auth_type = 1 AND gn.gateway_id IS NULL"
+        ), {"nu": node_uuid})
+        if res.rowcount:
+            import logging as _lg
+            _lg.getLogger("migrate").info(
+                "gateway_node backfill: %d 个存量注册网关回填到节点 %s", res.rowcount, node_uuid)
+        conn.commit()

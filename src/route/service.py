@@ -9,9 +9,10 @@
 from typing import Optional, Tuple, List
 
 from sqlalchemy import select, or_
+from core.config import NODE_UUID
 
 from db.models import (
-    PrefixRoute, Gateway, AccessPoint, AccessGatewayPolicy,
+    PrefixRoute, Gateway, GatewayNode, AccessPoint, AccessGatewayPolicy,
 )
 
 # 接入点↔落地策略：allow=1 命中才放；deny=2 命中即拒；无策略则放行。
@@ -105,6 +106,19 @@ def select_outbound_gateway(db, callee: str, ap_id: int = None) -> Optional[List
     candidates = [(pr, g) for pr, g in rows if callee.startswith(pr.prefix)]
     if not candidates:
         return None
+
+    # #64 多节点分片（D11）：注册型网关只归本节点，点对点全量。
+    # 选路范围因此被限制在节点内（failover/并发调度同样受限），属设计预期。
+    if NODE_UUID:
+        mine = set(db.scalars(
+            select(GatewayNode.gateway_id).where(GatewayNode.node_uuid == NODE_UUID)
+        ).all())
+        candidates = [
+            (pr, g) for pr, g in candidates
+            if int(getattr(g, "auth_type", 0) or 0) == 0 or g.id in mine
+        ]
+        if not candidates:
+            return None
 
     # G4：接入点↔落地策略前移为候选池过滤（N:M 回退）
     if ap_id is not None:

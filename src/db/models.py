@@ -205,6 +205,20 @@ class OperationLog(Base):
     created_at = mapped_column(DateTime)
 
 
+class GatewayNode(Base):
+    """#64 网关-节点归属：仅注册型网关(auth_type=1)单选唯一归属节点。
+
+    uk_gateway(gateway_id) 保证单选；点对点网关(auth_type=0)全量下发，不在此表。
+    三要素(ip+port+账号)唯一性为跨表约束，由 gateway CRUD 在应用层校验。
+    """
+    __tablename__ = "gateway_node"
+    id = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    gateway_id = mapped_column(BigInteger, ForeignKey("gateway.id"), nullable=False)
+    node_uuid = mapped_column(String(64), nullable=False)
+    created_at = mapped_column(DateTime)
+    updated_at = mapped_column(DateTime)
+
+
 class FsNode(Base):
     __tablename__ = "fs_node"
     id = mapped_column(BigInteger, primary_key=True, autoincrement=True)

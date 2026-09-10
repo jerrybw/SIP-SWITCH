@@ -71,6 +71,8 @@ ensure_account_customer_id_nullable(_write_engine)
 # #69：fs_node 健康字段（幂等）
 ensure_fs_node_health_columns(_write_engine)
 ensure_gateway_node_table(_write_engine)
+from db.migrate import ensure_gateway_node_backfill
+ensure_gateway_node_backfill(_write_engine)
 
 # 主从就绪后启用：
 # _read_engine = create_engine(settings["mysql"]["read_url"], echo=False)

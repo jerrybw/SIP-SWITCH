@@ -5,6 +5,9 @@ FS 通过 mod_xml_curl 的 `configuration` 绑定，在加载 sofia 配置时向
 含 <gateways> 的完整 sofia.conf，FS 侧零落盘。新增 FS 节点只需把 xml_curl 指向同一
 网关端点，底层无需改动（多机拆分零成本）。
 
+#64 多节点分片（D11）：下发按 NODE_UUID 过滤 ——
+注册型网关只下发给其归属节点，点对点网关全量下发。
+
 其余配置（acl.conf / event_socket.conf / modules.conf 等）本端点统一回空文档，
 FS 按 mod_xml_curl 标准回退行为使用磁盘文件，保持原行为不变。
 """
@@ -13,7 +16,8 @@ import os
 import re
 
 from sqlalchemy import select
-from db.models import Gateway
+from db.models import Gateway, GatewayNode
+from core.config import NODE_UUID
 
 log = logging.getLogger("fs_sofia_config")
 
@@ -52,8 +56,25 @@ def _gateway_xml(gw):
 
 
 def _gateways_block(db):
+    """#64 按节点下发（D11）：
+      - 注册型(auth_type=1)：只下发归属本 NODE_UUID 的网关；
+      - 点对点(auth_type=0)：全量下发到所有节点。
+    本网关实例用自身 NODE_UUID 过滤，故每个 FS 节点拉到的配置各不相同。
+    """
     gws = db.scalars(select(Gateway)).all()
-    items = [_gateway_xml(g) for g in gws]
+    if not gws:
+        return "<gateways></gateways>"
+    if NODE_UUID:
+        mine = set(db.scalars(
+            select(GatewayNode.gateway_id).where(GatewayNode.node_uuid == NODE_UUID)
+        ).all())
+    else:
+        mine = set()
+    items = []
+    for g in gws:
+        if int(getattr(g, "auth_type", 0) or 0) == 1 and g.id not in mine:
+            continue
+        items.append(_gateway_xml(g))
     if not items:
         return "<gateways></gateways>"
     return "<gateways>\n" + "\n".join(items) + "\n</gateways>"

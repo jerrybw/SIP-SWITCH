@@ -46,6 +46,9 @@ const SECTIONS = {
         hint: '出局目标地址：IPv4 / IPv6 / 域名，不含端口（端口填下方「端口」）' },
       { k: 'port', label: '端口', type: 'number', def: 5060 },
       { k: 'auth_type', label: '对接模式', type: 'select', options: [{ v: 0, t: '点对点' }, { v: 1, t: '注册' }] },
+      { k: 'node_uuid', label: '归属节点', type: 'select-src', src: '/api/nodes', optk: 'node_uuid', optt: 'name',
+        requiredIf: { k: 'auth_type', v: '1' },
+        hint: '注册模式：只下发给所选节点（单选）；点对点模式全量下发所有节点，无需选择' },
       { k: 'username', label: '账号', type: 'text' },
       { k: 'password', label: '密码', type: 'password' },
       { k: 'concurrent_limit', label: '并发上限(0=不限)', type: 'number', def: 0 },
@@ -616,6 +619,21 @@ async function openForm(key, id) {
       if (opt3) opt3.disabled = (otEl.value === '1');
     };
     otEl.onchange = sync; sync();
+  }
+  if (key === 'gateways') {
+    // #64：归属节点仅在「注册」模式下需要且显示；点对点全量下发 → 隐藏并清空。
+    var _atEl = document.getElementById('f_auth_type');
+    var _ndEl = document.getElementById('f_node_uuid');
+    if (_ndEl) {
+      var _row = _ndEl.closest('.field');
+      var _syncNode = function () {
+        var isReg = _atEl && String(_atEl.value) === '1';
+        _row.style.display = isReg ? '' : 'none';
+        if (!isReg) _ndEl.value = '';
+      };
+      _syncNode();
+      if (_atEl) _atEl.addEventListener('change', _syncNode);
+    }
   }
   document.getElementById('modal-title').textContent = (isEdit ? '编辑' : '新增') + ' · ' + sec.label;
   document.getElementById('modal').classList.remove('hidden');

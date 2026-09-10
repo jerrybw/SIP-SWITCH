@@ -35,7 +35,7 @@ except ImportError:
 except Exception as _e:
     log.warning("fs_provision 不可用，落地网关将不会自动下发到 FS: %s", _e)
 from db.models import (
-    AccessPoint, Gateway, PrefixRoute, Rule, AccessGatewayPolicy, Carrier, Business,
+    AccessPoint, Gateway, GatewayNode, PrefixRoute, Rule, AccessGatewayPolicy, Carrier, Business,
     SipPhone, SystemSetting, Account, Customer,
 )
 
@@ -131,6 +131,79 @@ def _apply(obj, data: dict, entity: str):
 
 
 # ---------------------------------------------------------------------------
+# #64 多节点分片：落地网关归属节点（注册型单选 / 点对点全量）
+# ---------------------------------------------------------------------------
+def _validate_gateway_node(db: Session, gw, gw_id, data: dict) -> None:
+    """注册型网关落库/更新**之前**的归属校验（失败直接 400，不产生孤儿行）。
+
+      - 注册型(auth_type=1)新建必须选归属节点；
+      - 同节点下 ip+port+账号 三要素唯一（跨表约束，MySQL 单键无法表达）。
+    """
+    if int(getattr(gw, "auth_type", 0) or 0) != 1:
+        return
+    node_uuid = data.get("node_uuid")
+    if not node_uuid:
+        if gw_id is None:  # 新建
+            raise HTTPException(status_code=400, detail="注册型落地网关必须选择归属节点")
+        return
+    ids = db.scalars(
+        select(GatewayNode.gateway_id).where(GatewayNode.node_uuid == node_uuid)
+    ).all()
+    for oid in ids:
+        if gw_id is not None and oid == gw_id:
+            continue
+        other = db.get(Gateway, oid)
+        if other and other.ip == gw.ip and (other.port or 5060) == (gw.port or 5060) \
+                and (other.username or "") == (gw.username or ""):
+            raise HTTPException(
+                status_code=400,
+                detail="同节点下已存在相同 IP+端口+账号 的落地网关")
+
+
+def _sync_gateway_node(db: Session, gw, data: dict, is_create: bool) -> None:
+    """注册型(auth_type=1) → upsert gateway_node；点对点(auth_type=0) → 删除归属行。
+
+    校验（必选节点 / 三要素唯一）已前移到 _validate_gateway_node，在 gateway 行落库
+    之前执行，避免校验失败时留下「已创建但无归属节点」的孤儿网关。
+    更新场景未提交 node_uuid 时保留原归属（PATCH 语义）。
+    """
+    node_uuid = data.get("node_uuid")
+    if int(getattr(gw, "auth_type", 0) or 0) == 1:
+        if not node_uuid:
+            return
+        gn = db.scalar(select(GatewayNode).where(GatewayNode.gateway_id == gw.id))
+        if gn:
+            gn.node_uuid = node_uuid
+            gn.updated_at = _now()
+        else:
+            # created_at/updated_at 为 NOT NULL 且 SQLAlchemy 会显式发 NULL 覆盖 DB 默认值，
+            # 故必须显式写入（与 Gateway/Cdr 的 CRUD 约定一致）。
+            db.add(GatewayNode(gateway_id=gw.id, node_uuid=node_uuid,
+                               created_at=_now(), updated_at=_now()))
+    else:
+        gn = db.scalar(select(GatewayNode).where(GatewayNode.gateway_id == gw.id))
+        if gn:
+            db.delete(gn)
+
+
+def _enrich_gateway_node(db: Session, items: list) -> list:
+    """把 gateway_node.node_uuid 回填进网关 dict（列表/单条共用，单次查询）。"""
+    if not items:
+        return items
+    ids = [it["id"] for it in items if it.get("id") is not None]
+    if not ids:
+        return items
+    rows = db.execute(
+        select(GatewayNode.gateway_id, GatewayNode.node_uuid)
+        .where(GatewayNode.gateway_id.in_(ids))
+    ).all()
+    m = {r[0]: r[1] for r in rows}
+    for it in items:
+        it["node_uuid"] = m.get(it["id"])
+    return items
+
+
+# ---------------------------------------------------------------------------
 # 下拉数据源（须定义在通用 /{entity} 通配之前，避免被吞）
 # ---------------------------------------------------------------------------
 # ⚠️ v0.3 路由顺序铁律：FastAPI 按注册顺序匹配，先注册的精确路径会永久屏蔽后续通配路由。
@@ -208,8 +281,11 @@ def list_entity(entity: str, request: Request, page: int = Query(1, ge=1),
         page = total_pages
     offset = (page - 1) * page_size
     rows = db.scalars(q.order_by(MODEL[entity].id.desc()).offset(offset).limit(page_size)).all()
+    items = [_to_dict(r, entity) for r in rows]
+    if entity == "gateways":
+        _enrich_gateway_node(db, items)
     return {
-        "items": [_to_dict(r, entity) for r in rows],
+        "items": items,
         "page": page,
         "page_size": page_size,
         "total": total,
@@ -373,6 +449,8 @@ async def create_entity(entity: str, request: Request, db: Session = Depends(get
         _validate_phone(db, data)
     obj = MODEL[entity]()
     _apply(obj, data, entity)
+    if entity == "gateways":
+        _validate_gateway_node(db, obj, None, data)
     obj.created_at = _now()
     if hasattr(obj, "updated_at"):
         obj.updated_at = _now()
@@ -383,13 +461,23 @@ async def create_entity(entity: str, request: Request, db: Session = Depends(get
         db.rollback()
         raise HTTPException(status_code=400, detail=f"create failed: {e}")
     db.refresh(obj)
+    if entity == "gateways":
+        _sync_gateway_node(db, obj, data, is_create=True)
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"gateway node sync failed: {e}")
     if entity=="gateways" and provision is not None:
         try:
             _pv=provision(obj)
             log.info("auto-provision gateway %s: %s",obj.name,_pv)
         except Exception as _e:
             log.error("auto-provision gateway %s failed: %s",getattr(obj,"name",None),_e)
-    return _to_dict(obj, entity)
+    r = _to_dict(obj, entity)
+    if entity == "gateways":
+        _enrich_gateway_node(db, [r])
+    return r
 
 
 @router.get("/{entity}/{item_id}")
@@ -399,7 +487,10 @@ def get_entity(entity: str, item_id: int, db: Session = Depends(get_db)):
     obj = db.get(MODEL[entity], item_id)
     if obj is None:
         raise HTTPException(status_code=404, detail="not found")
-    return _to_dict(obj, entity)
+    r = _to_dict(obj, entity)
+    if entity == "gateways":
+        _enrich_gateway_node(db, [r])
+    return r
 
 
 @router.put("/{entity}/{item_id}")
@@ -417,6 +508,8 @@ async def update_entity(entity: str, item_id: int, request: Request, db: Session
     if entity in ("access-points", "gateways"):
         _validate_endpoint(db, data, entity, obj)
     _apply(obj, data, entity)
+    if entity == "gateways":
+        _validate_gateway_node(db, obj, obj.id, data)
     if hasattr(obj, "updated_at"):
         obj.updated_at = _now()
     try:
@@ -438,13 +531,23 @@ async def update_entity(entity: str, item_id: int, request: Request, db: Session
         except Exception as _e:
             log.error("clear cost cache failed: %s", _e)
     db.refresh(obj)
+    if entity == "gateways":
+        _sync_gateway_node(db, obj, data, is_create=False)
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"gateway node sync failed: {e}")
     if entity=="gateways" and provision is not None:
         try:
             _pv=provision(obj)
             log.info("auto-provision gateway %s: %s",obj.name,_pv)
         except Exception as _e:
             log.error("auto-provision gateway %s failed: %s",getattr(obj,"name",None),_e)
-    return _to_dict(obj, entity)
+    r = _to_dict(obj, entity)
+    if entity == "gateways":
+        _enrich_gateway_node(db, [r])
+    return r
 
 
 @router.delete("/{entity}/{item_id}")
