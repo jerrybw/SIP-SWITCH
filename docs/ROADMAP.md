@@ -136,7 +136,7 @@
 | T-502 | FS 配置一致性管理 | ❌ | 无（R-03 定案 git+脚本下发，未落地） |
 | T-503 | DB 主从读写分离 | ❌ | 单 MySQL |
 | T-504 | 在途通话中断 CDR 兜底 | ⚠️ | spool+reaper 覆盖 DB 抖动，**未覆盖节点故障** |
-| **#69** | **FS 节点级健康检查（DEP-6）** | **✅** | `src/node_health.py`（ESL 探测）+ `src/alerting.py`（告警出口）；`fs_node` 扩 5 列；按 `NODE_UUID` 自注册 upsert；`online/offline/overload` 三态 + `operation_log` 告警去重。**Phase1 只记录+告警、不摘除**（摘除留给 Phase2 选路按 node 过滤）。顺带闭环坑位 #18 落地网关心跳告警 |
+| **#69** | **FS 节点级健康检查（DEP-6）+ Web 状态页 + Webhook 外部推送** | **✅** | `src/node_health.py`（ESL 探测）+ `src/alerting.py`（告警出口，`operation_log` 去重）；`fs_node` 扩 5 列；按 `NODE_UUID` 自注册 upsert；`online/offline/overload` 三态。**Phase1 只记录+告警、不摘除**（摘除留给 Phase2 选路按 node 过滤）。顺带闭环坑位 #18（落地网关心跳告警）+ #33（告警独立事务）。**2026-09-10 延伸**：① 前端新增「节点状态」tab（`src/static/admin.js` `renderNodes` + `src/templates/index.html`），展示各节点 UUID/地址/状态/并发/注册数/最后心跳，15s 自动刷新；② webhook 外部推送落地：`system_setting` 两项 `webhook_gateway_heartbeat_url` / `webhook_node_heartbeat_url`（落地网关 / FS 节点**分开配置**，空=不推送），`src/alerting.py::push_webhook`（urllib POST 企业微信 markdown，状态变化时才触发、异步线程、5s 超时），前端表单 + `POST /api/webhook-test` 测试；`src/api/app.py` 新增 `GET /api/nodes`。⚠️ 这两路由须注册在 `app.include_router(crud_router)` 之前，否则被 `/api/{entity}` 兜底吞掉（PITFALLS #34）。**已端到端验证**：`/api/nodes` 返回节点、`/api/webhook-test` 与企业微信 `errcode:0`、`alert_if_changed` 触发真实推送并落 `operation_log` |
 | T-401~404 | SIPp 压测 / 调优 / 切换演练 / 报告 | ❌ | 仅 `deploy/sipp-stub`（功能测试桩，**非压测脚本**）。M4 是上生产硬门槛，DEV 单机跑不了真实规格 |
 | P3 | 注册视图 + 多 FS | ⚠️ | ✅ `sip_phone` + `/fs/directory` 动态目录；❌ 多 FS 分发（同 T-501） |
 | P4 | xml_curl configuration + 上云 | ⚠️ | ✅ 已用 xml_curl（`/fs/dialplan` + `/fs/directory`）；❌ 上云 |

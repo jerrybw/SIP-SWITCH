@@ -21,7 +21,7 @@ import re
 
 from core.config import settings
 from db.session import get_db
-from db.models import Cdr, AccessPoint, Gateway, SipPhone
+from db.models import Cdr, AccessPoint, Gateway, SipPhone, FsNode
 from rules.service import (
     evaluate_call, evaluate_call_scoped, apply_translate,
     OWNER_ACCESS_POINT, OWNER_GATEWAY,
@@ -36,6 +36,7 @@ from route.service import select_outbound_gateway, resolve_access_point, resolve
 from esl_client import get_concurrency
 from api.directory_xml import fs_directory
 from fs_sofia_config import build_config_response
+from alerting import push_webhook
 
 app = FastAPI(title="SIP Switch Gateway API", version="0.2.0")
 
@@ -141,6 +142,42 @@ from api.crud import router as crud_router
 from api.auth import get_current_admin, router as auth_router
 from api.billing import router as billing_router
 from api.accounts import router as accounts_router
+
+# ---------------------------------------------------------------------------
+# 节点状态 + Webhook 推送（#70 系列：节点健康可视化 + 外部告警落地）
+# 必须注册在 crud_router 之前：crud 的 /api/{entity} 兜底路由会吞掉 /api/nodes。
+# ---------------------------------------------------------------------------
+@app.get("/api/nodes")
+def list_nodes(db: Session = Depends(get_db)):
+    """FS 节点健康检查快照（DEP-6 / #69）：各节点在线状态 + 并发 + 注册数 + 最后心跳。"""
+    rows = db.scalars(select(FsNode).order_by(FsNode.id)).all()
+    cols = FsNode.__table__.columns
+    items = [{c.name: getattr(r, c.name) for c in cols} for r in rows]
+    return {"items": items}
+
+
+@app.post("/api/webhook-test")
+async def webhook_test(request: Request):
+    """向指定 webhook 地址发送一条测试消息，验证配置是否可达。
+
+    入参：{ "gateway_url": "...", "node_url": "..." }（哪个有值测哪个）。
+    复用与真实告警相同的 push_webhook，保证测试等价于真实推送。
+    """
+    data = await request.json()
+    targets = []
+    if data.get("gateway_url"):
+        targets.append(("gateway", data["gateway_url"]))
+    if data.get("node_url"):
+        targets.append(("node", data["node_url"]))
+    results = []
+    for ch, url in targets:
+        md = ("**Webhook 推送测试**\n"
+              "> 渠道: %s\n"
+              "> 这是一条来自 SIP 路由网关的测试消息，说明 webhook 配置已生效。") % ch
+        ok, msg = push_webhook(url, md)
+        results.append({"channel": ch, "url": url, "ok": ok, "msg": msg})
+    return {"results": results}
+
 
 app.include_router(auth_router)
 app.include_router(billing_router)

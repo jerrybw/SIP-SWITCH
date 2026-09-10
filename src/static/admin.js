@@ -141,6 +141,7 @@ SECTIONS['accounts'] = {
     { k: 'status', label: '状态', type: 'select', options: [{ v: 1, t: '启用' }, { v: 0, t: '停用' }] },
   ],
 };
+SECTIONS['nodes'] = { label: '节点状态', custom: 'nodes' };
 function renderAccounts(key, st) {
   st = st || { page: 1, page_size: 50 };
   var c = document.getElementById('content');
@@ -376,6 +377,7 @@ function renderSidebar() {
   });
 }
 async function showSection(key) {
+  if (window._nodesTimer) { clearInterval(window._nodesTimer); window._nodesTimer = null; }
   CURRENT = key;
   document.querySelectorAll('#sidebar a').forEach(function (a) {
     a.classList.toggle('active', a.dataset.key === key);
@@ -391,6 +393,7 @@ async function showSection(key) {
   if (sec.custom === 'billing') { renderBilling(key, st); return; }
   if (sec.custom === 'accounts') { renderAccounts(key, st); return; }
   if (sec.custom === 'carriers') { renderCarriers(key, st); return; }
+  if (sec.custom === 'nodes') { renderNodes(key, st); return; }
   let fq = '';
   if (sec.filters) fq = filterQs(st.filters || {});
   const data = await api(sec.list + '?page=' + st.page + '&page_size=' + st.page_size + fq);
@@ -1136,6 +1139,100 @@ function saveTopBar(key, sec) {
     window._sysConfig = r;
     toast('已保存');
   }).catch(function (e) { toast('保存失败：' + e.message, true); });
+}
+
+// ---- 节点状态 + Webhook 配置（#70 系列）----
+function renderNodes(key, st) {
+  st = st || {};
+  const c = document.getElementById('content');
+  c.innerHTML =
+    '<div class="section-head"><h2>节点状态</h2>' +
+    '<button class="btn btn-sm" id="nodes-refresh">刷新</button></div>' +
+    '<div id="nodes-table" class="placeholder">加载中…</div>' +
+    '<div class="card" style="margin-top:18px">' +
+    '<div class="section-head"><h3>Webhook 推送配置</h3>' +
+    '<span class="muted" style="font-size:12px">落地网关心跳与 FS 节点心跳分开配置</span></div>' +
+    '<div class="webhook-row"><label>落地网关心跳 webhook</label>' +
+    '<input id="wh_gw" class="pager-input" style="flex:1" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">' +
+    '<button class="btn btn-sm" id="wh_gw_test">测试</button></div>' +
+    '<div class="webhook-row"><label>FS 节点心跳 webhook</label>' +
+    '<input id="wh_node" class="pager-input" style="flex:1" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">' +
+    '<button class="btn btn-sm" id="wh_node_test">测试</button></div>' +
+    '<div style="margin-top:12px"><button class="btn btn-primary btn-sm" id="wh_save">保存配置</button>' +
+    '<span id="wh_msg" class="muted" style="margin-left:10px"></span></div>' +
+    '<div class="hint" style="margin-top:8px">地址留空 = 不推送。保存后立即生效，无需重启。</div></div>';
+
+  api('/api/sys-config').then(function (cfg) {
+    const gw = document.getElementById('wh_gw');
+    const nd = document.getElementById('wh_node');
+    if (gw) gw.value = (cfg && cfg.webhook_gateway_heartbeat_url) || '';
+    if (nd) nd.value = (cfg && cfg.webhook_node_heartbeat_url) || '';
+  }).catch(function () {});
+
+  document.getElementById('nodes-refresh').onclick = function () { loadNodes(); };
+  document.getElementById('wh_save').onclick = saveWebhook;
+  document.getElementById('wh_gw_test').onclick = function () { testWebhook('gateway'); };
+  document.getElementById('wh_node_test').onclick = function () { testWebhook('node'); };
+  loadNodes();
+  // 进入页面后自动刷新（15s），离开节点页时由 showSection 清除定时器
+  window._nodesTimer = setInterval(function () { if (CURRENT === 'nodes') loadNodes(); }, 15000);
+}
+
+function loadNodes() {
+  const el = document.getElementById('nodes-table');
+  if (!el) return;
+  api('/api/nodes').then(function (data) {
+    const rows = (data && data.items) || [];
+    if (!rows.length) {
+      el.innerHTML = '<div class="placeholder">暂无节点。节点由网关按 NODE_UUID 自动注册，稍候刷新。</div>';
+      return;
+    }
+    const stMap = { 0: ['离线', 'badge-off'], 1: ['在线', 'badge-on'], 2: ['过载', 'badge-warn'] };
+    let h = '<table><thead><tr><th>UUID</th><th>名称</th><th>地址</th><th>ESL端口</th>' +
+      '<th>状态</th><th>并发</th><th>注册分机</th><th>连续失败</th><th>最后心跳</th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      const sm = stMap[r.status] || ['未知', ''];
+      h += '<tr><td>' + (r.node_uuid || '') + '</td>' +
+        '<td>' + (r.name || '') + '</td>' +
+        '<td>' + (r.host || '') + '</td>' +
+        '<td>' + (r.esl_port != null ? r.esl_port : '') + '</td>' +
+        '<td><span class="badge ' + sm[1] + '">' + sm[0] + '</span></td>' +
+        '<td>' + (r.last_concurrency != null ? r.last_concurrency : '—') + '</td>' +
+        '<td>' + (r.last_reg_count != null ? r.last_reg_count : '—') + '</td>' +
+        '<td>' + (r.fail_count || 0) + '</td>' +
+        '<td>' + (r.last_heartbeat_at ? fmtBJ(r.last_heartbeat_at) : '—') + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    el.innerHTML = h;
+  }).catch(function (e) {
+    el.innerHTML = '<div class="placeholder err">加载失败：' + e.message + '</div>';
+  });
+}
+
+function saveWebhook() {
+  const body = {
+    webhook_gateway_heartbeat_url: document.getElementById('wh_gw').value.trim(),
+    webhook_node_heartbeat_url: document.getElementById('wh_node').value.trim(),
+  };
+  api('/api/sys-config', 'PUT', body).then(function () {
+    const m = document.getElementById('wh_msg');
+    m.textContent = '已保存';
+    setTimeout(function () { m.textContent = ''; }, 2500);
+  }).catch(function (e) {
+    document.getElementById('wh_msg').textContent = '保存失败：' + e.message;
+  });
+}
+
+function testWebhook(channel) {
+  const url = channel === 'gateway'
+    ? document.getElementById('wh_gw').value.trim()
+    : document.getElementById('wh_node').value.trim();
+  if (!url) { toast('请先填写 ' + (channel === 'gateway' ? '落地网关' : '节点') + ' webhook 地址', true); return; }
+  const body = channel === 'gateway' ? { gateway_url: url } : { node_url: url };
+  api('/api/webhook-test', 'POST', body).then(function (r) {
+    const res = ((r && r.results) || [])[0] || {};
+    toast(res.ok ? ('推送成功：' + res.msg) : ('推送失败：' + res.msg), !res.ok);
+  }).catch(function (e) { toast('测试失败：' + e.message, true); });
 }
 
 // ---- T-301 管理端登录态 ----
