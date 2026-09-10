@@ -777,3 +777,37 @@ def ensure_fs_node_health_columns(engine) -> None:
     ]
     with engine.connect() as conn:
         _add_cols(conn, adds)
+
+
+def ensure_gateway_node_table(engine) -> None:
+    """#64 网关-节点归属表：仅注册型网关(auth_type=1)单选唯一归属节点。
+
+    幂等建表；uk_gateway(gateway_id) 保证一个网关只能归属一个节点(单选)。
+    点对点网关(auth_type=0)全量下发，不在此表。
+    三要素(ip+port+注册用户名)唯一性属跨表约束，由 gateway CRUD 在应用层校验(见 #64 实现)。
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        exists = conn.execute(text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = 'gateway_node'"
+        )).scalar() is not None
+        if exists:
+            return
+        ddl = (
+            "CREATE TABLE gateway_node ("
+            "id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, "
+            "gateway_id BIGINT UNSIGNED NOT NULL, "
+            "node_uuid VARCHAR(64) NOT NULL, "
+            "created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), "
+            "updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), "
+            "PRIMARY KEY (id), "
+            "UNIQUE KEY uk_gateway (gateway_id), "
+            "KEY idx_node (node_uuid), "
+            "CONSTRAINT fk_gn_gateway FOREIGN KEY (gateway_id) REFERENCES gateway (id) ON DELETE CASCADE, "
+            "CONSTRAINT fk_gn_node FOREIGN KEY (node_uuid) REFERENCES fs_node (node_uuid) ON DELETE CASCADE"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+        )
+        conn.execute(text(ddl))
+        conn.commit()

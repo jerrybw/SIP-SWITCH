@@ -38,6 +38,7 @@ from db.migrate import ensure_validation_constraints, ensure_endpoint_host_colum
 from db.migrate import ensure_account_customer_id_nullable  # noqa: E402
 # #69 FS 节点健康检查（DEP-6）
 from db.migrate import ensure_fs_node_health_columns  # noqa: E402
+from db.migrate import ensure_gateway_node_table  # noqa: E402
 
 ensure_rule_act_column(_write_engine)
 ensure_rule_replace_to_column(_write_engine)
@@ -69,6 +70,7 @@ ensure_endpoint_host_columns(_write_engine)
 ensure_account_customer_id_nullable(_write_engine)
 # #69：fs_node 健康字段（幂等）
 ensure_fs_node_health_columns(_write_engine)
+ensure_gateway_node_table(_write_engine)
 
 # 主从就绪后启用：
 # _read_engine = create_engine(settings["mysql"]["read_url"], echo=False)

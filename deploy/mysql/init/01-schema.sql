@@ -347,4 +347,17 @@ CREATE TABLE `system_setting` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_setting_key` (`key`)
 ) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='系统设置';
+CREATE TABLE `gateway_node` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `gateway_id` bigint unsigned NOT NULL COMMENT '关联 gateway.id (仅注册型网关 auth_type=1)',
+  `node_uuid` varchar(64) NOT NULL COMMENT '归属 FS 节点 fs_node.node_uuid',
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updated_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_gateway` (`gateway_id`),
+  KEY `idx_node` (`node_uuid`),
+  CONSTRAINT `fk_gn_gateway` FOREIGN KEY (`gateway_id`) REFERENCES `gateway` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_gn_node` FOREIGN KEY (`node_uuid`) REFERENCES `fs_node` (`node_uuid`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='网关-节点归属：仅注册型网关单选唯一归属节点；点对点网关(auth_type=0)全量下发不在此表';
 SET FOREIGN_KEY_CHECKS=1;
