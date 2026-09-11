@@ -373,3 +373,28 @@
 
 ### 交付
 代码在 dev 工作树（`src/api/app.py` 单文件改动 +130/−25，未与 #73 同提交），**待提交推送**（与 #73 一并过 `git-push-secret-scan`）。
+
+## 2026-09-11 修复记录（四：#75 ESL 可靠性改造，dev 验证通过）
+
+**背景**：ESL 事件为 at-most-once（无 ACK/无重放），实测单条 `CHANNEL_HANGUP_COMPLETE`
+静默丢失（案例 3dd839b9：80000003→ccccc 已接通挂断，FS 通道销毁但网关未收到挂断事件），
+导致进程内并发计数 `_conc` 永久漂移（gw7 卡 1/1），limit 小的落地网关被整通 503 拒呼。
+
+**三层改造（全部在 `src/esl_client.py`，+`src/main.py` 启动挂载）**：
+1. **事件异步化**：ESL reader 只解析入队（有界 10000，满则丢弃计数告警），
+   `esl-event-worker` 线程消费 `handle_event` —— 消费慢不再反压 FS socket 造成丢事件。
+2. **CDR 攒批落库**：`_save_cdr` 产物入队，`cdr-writer` 线程攒批（50 条/200ms）
+   单事务提交；失败项退化逐条重试（3 次），最终失败落 `cdr_spool`（reaper 重灌）。
+   `_upsert_cdr_dict` 新增 `db=` 共享会话参数，默认路径行为不变。
+3. **对账自愈**：`esl-reconcile` 线程 30s 周期 + ESL 订阅/重连成功即触发；
+   用 ESL `show channels` 快照对照 `_call_store`，对「FS 通道已消失但仍被计数」的腿
+   补减计数（`_dec_count_leg` 加 `_dec_done` 幂等闸，挂断路径 dec+pop 原子化+身份校验防双扣）
+   并回填骨架 CDR 终态（仅 `hangup_cause IS NULL` 行：end_time/talk/bill/cause；
+   已接通=NORMAL_CLEARING，未接通=UNKNOWN；**计费金额不在对账内重算**，待 xml_cdr 真源）。
+
+**验证**：容器内回放 10/10 PASS（正常呼叫攒批落库 / 幂等减计 / 异步消费 / 丢 HANGUP 对账自愈 /
+活跃腿不误伤）；回归 pytest 15 passed；真机部署后 dialplan 恢复正常出局（bridge testgateway，
+不再 busy_limit 503）。
+
+**遗留**：① 金额兜底待 mod_xml_cdr 真源（P1）；② 并发预检改实时查询（P2，高并发前做）；
+③ 对账「欠计」方向（ESL 断连期间新建的呼叫计数缺失）仅观测不修。

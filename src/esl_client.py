@@ -15,6 +15,7 @@ import os
 import glob
 import time
 from datetime import datetime
+import queue
 from math import ceil
 from decimal import Decimal
 
@@ -39,6 +40,206 @@ _store_lock = threading.Lock()
 # 计数口径：仅对主(A)腿计数，下游(B)腿合并不双计；cdr_* 通道变量到达即补计 ap/gw。
 _conc: dict = {"global": 0, "ap": {}, "gw": {}}
 _conc_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# #75 可靠性改造（2026-09-11）：事件异步化 + CDR 攒批落库 + 对账自愈。
+# 背景：ESL 事件是 at-most-once（无 ACK/无重放），实测单条 HANGUP_COMPLETE 丢失即导致
+# _conc 永久漂移（3dd839b9 案例）+ CDR 骨架无终态。三层防御：
+#   a) reader 只入队（有界），worker 线程消费 —— 消费慢不再反压 FS socket 造成丢事件；
+#   b) CDR 写入走 writer 线程攒批（50 条/200ms）单事务提交 —— 高并发下落库吞吐数量级提升；
+#   c) 对账线程：30s 周期 + ESL 订阅/重连成功即触发，用 ESL `show channels` 快照对照
+#      _call_store，把「FS 通道已消失但仍被计数」的腿补减计数并回填 CDR 终态。
+# 语义约定：对账只修「过计」方向（会把 limit 小的网关打死）；「欠计」方向无法从通道
+# 列表还原 gw/ap 维度，不修。对账回填 hangup_cause：已接通=NORMAL_CLEARING，未接通=
+# UNKNOWN（真实原因随事件丢失，无法还原）；计费金额不在对账内重算（待 xml_cdr 真源）。
+_EVT_Q = queue.Queue(maxsize=10000)
+_EVT_DROPPED = 0
+_CDR_Q = queue.Queue(maxsize=10000)
+_RECONCILE_REQ = threading.Event()
+_RECONCILE_INTERVAL = 30
+
+
+def _enqueue_event(ev) -> None:
+    """reader -> worker 入队；队列满（消费持续不过来）丢弃并计数告警。"""
+    global _EVT_DROPPED
+    try:
+        _EVT_Q.put_nowait(ev)
+    except queue.Full:
+        _EVT_DROPPED += 1
+        if _EVT_DROPPED % 100 == 1:
+            print("[ESL] event queue FULL, dropped=%d (worker too slow)" % _EVT_DROPPED, flush=True)
+
+
+def _event_worker_loop() -> None:
+    while True:
+        ev = _EVT_Q.get()
+        try:
+            handle_event(ev)
+        except Exception as e:  # noqa: BLE001
+            print("[ESL] handle error:", e)
+
+
+def _enqueue_cdr_job(uuid, job, fallback=None) -> None:
+    """CDR 落库任务入队（writer 攒批执行）。队列满时同步兜底执行，绝不丢任务。"""
+    try:
+        _CDR_Q.put_nowait((uuid, job, fallback))
+    except queue.Full:
+        try:
+            db = SessionLocal()
+            try:
+                job(db)
+                db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            print("[CDR] queue-full sync write failed (uuid=%s): %s" % (uuid, e), flush=True)
+            if fallback:
+                try:
+                    fallback()
+                except Exception as e2:
+                    print("[CDR] spool fallback failed (uuid=%s): %s" % (uuid, e2), flush=True)
+
+
+def _cdr_writer_loop(batch_size=50, flush_wait=0.2) -> None:
+    """CDR writer：攒批（batch_size 条或 flush_wait 秒）单事务提交。
+    失败项退化为逐条重试（各自独立会话，等价旧 _upsert_cdr_dict 行为），最终 spool。"""
+    while True:
+        batch = [_CDR_Q.get()]
+        deadline = time.monotonic() + flush_wait
+        while len(batch) < batch_size:
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            try:
+                batch.append(_CDR_Q.get(timeout=remain))
+            except queue.Empty:
+                break
+        failed = []
+        db = SessionLocal()
+        try:
+            for item in batch:
+                try:
+                    item[1](db)
+                except Exception as e:
+                    failed.append((item, e))
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            failed = [(it, None) for it in batch]
+        finally:
+            db.close()
+        for (uuid, job, fallback), _e in failed:
+            _retry_cdr_single(uuid, job, fallback)
+
+
+def _retry_cdr_single(uuid, job, fallback, attempts=3) -> None:
+    for i in range(attempts):
+        db = SessionLocal()
+        try:
+            job(db)
+            db.commit()
+            return
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print("[CDR] retry %d/%d failed (uuid=%s): %s" % (i + 1, attempts, uuid, e), flush=True)
+            time.sleep(0.5)
+        finally:
+            db.close()
+    if fallback:
+        try:
+            fallback()
+        except Exception as e:
+            print("[CDR] spool fallback failed (uuid=%s): %s" % (uuid, e), flush=True)
+
+
+def _reconcile_loop() -> None:
+    while True:
+        _RECONCILE_REQ.wait(_RECONCILE_INTERVAL)
+        _RECONCILE_REQ.clear()
+        try:
+            _reconcile_pass()
+        except Exception as e:  # noqa: BLE001
+            print("[reconcile] error:", e)
+
+
+def _reconcile_pass() -> None:
+    """用 ESL `show channels` 快照对照 _call_store，修复「通道已消失但仍被计数」的腿。"""
+    from fs_esl_cmd import esl_api
+    raw = esl_api("show channels")
+    if raw is None:
+        return  # ESL 查询不可用：宁可不修也不猜
+    live = set()
+    lines = [l for l in (raw or "").splitlines() if l.strip()]
+    if len(lines) > 1:
+        import csv
+        import io as _io
+        for row in csv.DictReader(_io.StringIO("\n".join(lines))):
+            u = (row.get("uuid") or "").strip()
+            if u:
+                live.add(u)
+    leaks = []
+    with _store_lock:
+        for u, rec in list(_call_store.items()):
+            if rec.get("_merged_into") or not rec.get("_counted_global"):
+                continue
+            if u not in live and not rec.get("_dec_done"):
+                leaks.append((u, rec))
+    if not leaks:
+        return
+    end_time = datetime.utcnow()
+    fixed = []
+    for u, rec in leaks:
+        with _store_lock:
+            if _call_store.get(u) is not rec:
+                continue  # 并发窗口：挂断路径已处理
+            _call_store.pop(u, None)
+        _dec_count_leg(rec)
+        _finalize_lost_cdr(u, rec, end_time)
+        fixed.append(u)
+    print("[reconcile] healed %d lost-hangup leg(s): %s" % (
+        len(fixed), [u[:8] for u in fixed]), flush=True)
+
+
+def _finalize_lost_cdr(call_uuid: str, rec: dict, end_time) -> None:
+    """对账回填：仅当该 uuid 的 CDR 终态缺失（hangup_cause IS NULL）时补终态。
+    计费（cost/扣费）不在对账内重算 —— P0 只保证账本与计数自愈，金额兜底待 xml_cdr 真源。"""
+    talk = None
+    bill = 0
+    if rec.get("answer_time") and end_time:
+        talk = int((end_time - rec["answer_time"]).total_seconds())
+        bu = rec.get("bill_unit") or 60
+        if talk > 0:
+            bill = ceil(talk / bu) * bu
+    cause = "NORMAL_CLEARING" if rec.get("answer_time") else "UNKNOWN"
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(
+                update(Cdr)
+                .where(Cdr.uuid == call_uuid, Cdr.hangup_cause.is_(None))
+                .values(end_time=end_time, hangup_cause=cause,
+                        talk_duration=talk, bill_duration=bill,
+                        created_at=datetime.utcnow())
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001
+        print("[reconcile] finalize CDR failed (uuid=%s): %s" % (call_uuid, e), flush=True)
+
+
+def start_esl_background_workers() -> None:
+    """main.py 启动时调用：事件 worker / CDR writer / 对账线程各一条（daemon）。"""
+    threading.Thread(target=_event_worker_loop, daemon=True, name="esl-event-worker").start()
+    threading.Thread(target=_cdr_writer_loop, daemon=True, name="cdr-writer").start()
+    threading.Thread(target=_reconcile_loop, daemon=True, name="esl-reconcile").start()
+    print("[esl] background workers started (event-worker/cdr-writer/reconcile=%ds)" % _RECONCILE_INTERVAL, flush=True)
 
 
 def _parse_ts(value):
@@ -140,6 +341,9 @@ def _maybe_count_leg(leg_uuid: str) -> None:
 def _dec_count_leg(rec: dict) -> None:
     """主(A)腿挂断时按已计维度 -1（与 _maybe_count_leg 对称）。"""
     with _conc_lock:
+        if rec.get("_dec_done"):
+            return  # #75：幂等减计（挂断路径与对账线程可能都触发）
+        rec["_dec_done"] = True
         if rec.get("_counted_global"):
             _conc["global"] = max(0, _conc["global"] - 1)
         ap = rec.get("access_point_id")
@@ -380,9 +584,11 @@ def handle_event(event) -> None:
         # 主(A)腿落库；cdr_* 与录音路径已在上方 capture 块缓存进 rec，直接沿用。
         _debug_dump(leg_uuid, rec, event)
         # P2：主(A)腿挂断，按已计维度减计并发。
-        _dec_count_leg(rec)
+        # #75：dec+pop 原子化 + 身份校验，与对账线程互斥（防双重减计/误清）。
         with _store_lock:
-            _call_store.pop(leg_uuid, None)
+            if _call_store.get(leg_uuid) is rec:
+                _dec_count_leg(rec)
+                _call_store.pop(leg_uuid, None)
         _save_cdr(leg_uuid, rec, event)
 
 
@@ -567,10 +773,14 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         created_at=datetime.utcnow(),
     )
 
-    # T-208 (R-608): 落库失败重试 + 主库故障暂存磁盘，不得静默丢失
-    if not _persist_cdr(cdr):
-        _spool_cdr(cdr)
-    else:
+    # T-208 (R-608): 落库失败重试 + 主库故障暂存磁盘，不得静默丢失。
+    # #75：写入移入 CDR writer 线程攒批提交（worker 不再阻塞在 DB 上）；语义不变：
+    # 落库成功才扣费，落库最终失败 spool 兜底。
+    def _persist_and_charge(db):
+        ok = _upsert_cdr_dict(
+            {c.name: getattr(cdr, c.name) for c in cdr.__table__.columns}, db=db)
+        if not ok:
+            raise RuntimeError("upsert returned False")
         # v0.3 预付费：落库成功后扣费（仅在接通且消费>0 且未扣过）。三道防重扣闸见 _charge_account。
         # 仅当「预付费开关」开启时挪动余额：开关关闭（停机窗口启用前/验证期）只做成本归集与报表，
         # 不扣余额、不写扣费流水，与 §5.5 第 3 步「余额校验（预付费开关开启时）」语义一致（fail-open 监控）。
@@ -586,6 +796,8 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
                 _charge_carrier(cdr.uuid, cost_price)
         except Exception as e:
             print("[billing] charge carrier failed (uuid=%s): %s" % (cdr.uuid, e))
+
+    _enqueue_cdr_job(call_uuid, _persist_and_charge, fallback=lambda: _spool_cdr(cdr))
 
 
 class ESLClient:
@@ -624,6 +836,7 @@ class ESLClient:
                     time_sleep(ESL_CFG.get("reconnect_interval", 3))
                     continue
                 print("[ESL] subscribed")
+                _RECONCILE_REQ.set()  # #75：订阅/重连成功即对账一次（补断连缺口）
                 last_sub = time.monotonic()
                 last_event = time.monotonic()
                 while not self._stop.is_set():
@@ -641,10 +854,8 @@ class ESLClient:
                         last_event = time.monotonic()
                         continue
                     last_event = time.monotonic()
-                    try:
-                        handle_event(ev)
-                    except Exception as e:  # noqa: BLE001
-                        print("[ESL] handle error:", e)
+                    # #75：reader 只入队，worker 线程消费（消费慢不再反压 FS socket）。
+                    _enqueue_event(ev)
                     # 周期重订阅：keepalive + 自愈可能丢失的订阅（不依赖整条连接重连）。
                     now = time.monotonic()
                     if now - last_sub > RESUB_INTERVAL:
@@ -733,7 +944,7 @@ def pre_insert_cdr(call_uuid, caller_in="", callee_in="", account_id=None,
         return False
 
 
-def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False):
+def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False, db=None):
     """T-208/T-计费：MySQL upsert（ON DUPLICATE KEY UPDATE）。
 
     重复事件 / reaper 重灌均幂等：冲突时按 uuid 更新（排除 id/uuid；created_at 由终态覆盖写入），
@@ -765,8 +976,12 @@ def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False):
             vals["start_time"] = _st
         elif vals.get("start_time") is None:
             vals["start_time"] = datetime.utcnow()
-    for i in range(attempts):
-        db = SessionLocal()
+    # #75：db 参数 —— writer 攒批时传入共享会话（异常向上抛，由 writer 统一
+    # 回滚/逐条重试）；默认 None 时保持旧行为（自开会话、独立 commit、attempts 重试）。
+    i = 0
+    while True:
+        own = db is None
+        s = db if db is not None else SessionLocal()
         try:
             stmt = mysql_insert(Cdr).values(**vals)
             if ignore_existing:
@@ -775,19 +990,25 @@ def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False):
             else:
                 upd = {c: stmt.inserted[c] for c in cols if c not in ("id", "uuid")}
             stmt = stmt.on_duplicate_key_update(**upd)
-            db.execute(stmt)
-            db.commit()
+            s.execute(stmt)
+            if own:
+                s.commit()
             return True
         except Exception as e:
+            if not own:
+                raise
             try:
-                db.rollback()
+                s.rollback()
             except Exception:
                 pass
-            print('[CDR] upsert attempt %d failed:' % (i + 1), e)
+            i += 1
+            if i >= attempts:
+                return False
+            print('[CDR] upsert attempt %d failed:' % i, e)
             time.sleep(0.5)
         finally:
-            db.close()
-    return False
+            if own:
+                s.close()
 
 
 def _spool_cdr(cdr):

@@ -27,6 +27,9 @@ from core.redis_client import startup_self_check
 if __name__ == '__main__':
     esl = ESLClient()
     esl.start()
+    # #75：事件 worker / CDR writer / 对账线程（daemon）
+    from esl_client import start_esl_background_workers
+    start_esl_background_workers()
     start_cdr_reaper()  # T-208：周期重灌 cdr_spool，DB 抖动恢复后补足落库失败的 CDR
     # 探测周期以 gateway.heartbeat_interval 为准（每轮现读 DB）；此参数仅为 DB 不可用时的兜底
     prober = HeartbeatProber()
