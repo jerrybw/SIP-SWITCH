@@ -18,6 +18,16 @@ if [ -z "${ESL_PASSWORD}" ]; then
   ESL_PASSWORD=$(head -c 48 /dev/urandom | base64 | tr -d "/+=" | head -c 32)
   echo "[entrypoint] 本次生成的 ESL_PASSWORD=${ESL_PASSWORD}（仅本次容器生命周期有效）" >&2
 fi
+# xml_curl 回调凭据（user:password）：网关侧 /fs/* 已启用 HTTP Basic 认证。
+# 缺失时生成随机值只会让网关侧对不上（全部 401），因此与 ESL_PASSWORD 同款告警，
+# 提示必须与 config_settings.yaml [xml_curl] 同源注入（deploy.sh 已自动处理）。
+if [ -z "${XMLCURL_USER}" ] || [ -z "${XMLCURL_PASSWORD}" ]; then
+  echo "[entrypoint] WARN: XMLCURL_USER/XMLCURL_PASSWORD 未注入，生成随机值" >&2
+  echo "[entrypoint] WARN: 网关侧 config_settings.yaml [xml_curl] 若非同值，/fs/* 将全部 401（xml_curl 失效）" >&2
+  XMLCURL_USER="${XMLCURL_USER:-xmlcurl}"
+  XMLCURL_PASSWORD=$(head -c 48 /dev/urandom | base64 | tr -d "/+=" | head -c 32)
+  echo "[entrypoint] 本次生成的 XMLCURL_PASSWORD=${XMLCURL_PASSWORD}（仅本次容器生命周期有效）" >&2
+fi
 RTP_START="${RTP_START:-20000}"
 RTP_END="${RTP_END:-20100}"
 
@@ -34,6 +44,8 @@ for f in /fs-config/autoload_configs/*.conf.xml; do
   b=$(basename "$f")
   sed -e "s|__ESL_PASSWORD__|${ESL_PASSWORD}|g" \
       -e "s|__GATEWAY_URL__|${GATEWAY_URL}|g" \
+      -e "s|__XMLCURL_USER__|${XMLCURL_USER}|g" \
+      -e "s|__XMLCURL_PASSWORD__|${XMLCURL_PASSWORD}|g" \
       "$f" > "$FS_CONF_DIR/autoload_configs/$b"
   echo "[entrypoint] rendered autoload_configs/$b"
 done

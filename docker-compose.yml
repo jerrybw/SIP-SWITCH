@@ -43,6 +43,9 @@ services:
     environment:
       EXT_SIP_IP: ${EXT_SIP_IP:-}
       ESL_PASSWORD: ${ESL_PASSWORD}
+      # xml_curl 回调网关 /fs/* 的 HTTP Basic 凭据（须与 config_settings.yaml [xml_curl] 同值）
+      XMLCURL_USER: ${XMLCURL_USER:-xmlcurl}
+      XMLCURL_PASSWORD: ${XMLCURL_PASSWORD}
       GATEWAY_URL: http://gateway:8000
       RTP_START: ${RTP_START:-20000}
       RTP_END: ${RTP_END:-20100}

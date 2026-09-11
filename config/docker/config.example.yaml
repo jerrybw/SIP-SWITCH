@@ -39,6 +39,14 @@ auth:
   jwt_secret: <random-secret>                  # secrets.token_hex(24)
   token_expire_minutes: 120
 
+# ---- xml_curl 回调鉴权（第1/3类）----
+# FS 经 mod_xml_curl 回调 /fs/dialplan /fs/directory /fs/config 的 HTTP Basic 共享凭据。
+# 必须与 .env 的 XMLCURL_USER / XMLCURL_PASSWORD 同值（deploy.sh 自动生成两侧同源）。
+# 留空 = fail-closed：网关对 /fs/* 一律 401，FS 拉不到任何配置。
+xml_curl:
+  user: xmlcurl
+  password: change-me-xmlcurl
+
 # ---- 节点标识（第1类；多节点部署须唯一）----
 # 留空 = 自动回落主机名（单机/开发可用）；生产多节点须由 deploy.sh 生成唯一值。
 node:

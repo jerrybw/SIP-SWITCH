@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import glob
@@ -38,13 +39,24 @@ def _esc(s):
     return s
 
 
-def _user_xml(user, password):
-    inner = (
-        "<params>"
-        + '<param name="password" value="%s"/>' % _esc(password)
-        + '<param name="context" value="default"/>'
-        + "</params>"
-    )
+def _user_xml(user, password, domain=""):
+    """单用户目录片。
+
+    安全收敛（与 /fs/* Basic 认证配套）：
+    - domain 非空时下发 `a1-hash`（md5("user:domain:password")）而非明文密码 ——
+      FS 摘要认证直接用 a1-hash 比对（internal profile challenge-realm=auto_from，
+      realm == 目录请求携带的 domain == 此处参与哈希的 domain，口径自洽），
+      xml_curl 响应体/日志里从此不再出现明文 SIP 密码。
+    - domain 为空（default_sip_domain 未配置且 FS 未携带）时退回明文密码参数：
+      此时无可靠 realm 口径，宁可保守兼容注册流程，也不能让全部话机注册挂掉。
+    """
+    inner_params = ['<param name="context" value="default"/>']
+    if domain:
+        a1 = hashlib.md5(f"{user}:{domain}:{password}".encode()).hexdigest()
+        inner_params.insert(0, '<param name="a1-hash" value="%s"/>' % a1)
+    else:
+        inner_params.insert(0, '<param name="password" value="%s"/>' % _esc(password))
+    inner = "<params>" + "".join(inner_params) + "</params>"
     return '<user id="%s">' % _esc(user) + inner + "</user>"
 
 
@@ -94,25 +106,40 @@ def _default_domain():
     return v
 
 
+def _lookup_user(db, ru):
+    """按用户名精确定位目录条目：先查 sip_phone（enabled），再查注册型接入点（status=1）。
+
+    返回密码或 None。替代旧实现的全表加载合并 dict —— 全表扫既浪费（每次目录请求
+    都拉全部话机+接入点），也是明文泄露面的一部分。
+    """
+    ph = db.scalar(select(SipPhone).where(
+        SipPhone.phone_number == ru, SipPhone.enabled == 1))
+    if ph is not None:
+        return ph.password
+    aps = db.scalars(select(AccessPoint).where(
+        AccessPoint.reg_username == ru, AccessPoint.status == 1)).all()
+    for a in aps:
+        if a.auth_mode == 1:
+            return a.reg_password or ""
+    return None
+
+
 def fs_directory(params, db):
-    print("DIRQ", dict(params), flush=True)
+    log.debug("DIRQ %s", dict(params))
     qp = params
     ru = (qp.get("user") or qp.get("sip_auth_username")
           or qp.get("sip_from_user"))
     # 兜底域：FS 的目录请求多数带 domain/key_value，但 purpose=gateways 一类请求
     # 两者皆空。此处不再硬编码任何环境 IP，改为：请求参数 -> 配置 default_sip_domain。
     domain = qp.get("domain") or qp.get("key_value") or _default_domain()
-    # 2026-09-03：只对「管理启用」的话机出目录（enabled=1）；停用话机目录不可见 →
-    # FS 拒绝其注册/呼入。注册型接入点同样按 status=1 过滤。
-    rows = db.scalars(select(SipPhone).where(SipPhone.enabled == 1)).all()
-    merged = {r.phone_number: r.password for r in rows}
-    for a in db.scalars(select(AccessPoint).where(AccessPoint.status == 1)).all():
-        if a.auth_mode == 1 and a.reg_username:
-            merged[a.reg_username] = a.reg_password or ""
+    # 安全收敛：不再支持「无 user 的全量目录导出」。FS 真实认证/定位流程（REGISTER/
+    # INVITE 挑战、sofia_contact、user_exists）全部携带 user= 参数；无 user 的全量
+    # 拉取只服务于人工调试，却会把**全部话机与接入点的凭据**一次性回显给调用方。
+    # 此处回空 <users/>（保留 domain 级 dial-string 参数），需要排查时用带 user 的
+    # 精确查询，或直接查 DB。
     if ru:
-        pw = merged.get(ru)
+        pw = _lookup_user(db, ru)
         if pw is None:
             return _doc(domain, "")
-        return _doc(domain, _user_xml(ru, pw))
-    ux = "".join(_user_xml(u, p) for u, p in merged.items())
-    return _doc(domain, ux)
+        return _doc(domain, _user_xml(ru, pw, domain))
+    return _doc(domain, "")

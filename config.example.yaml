@@ -59,3 +59,9 @@ concurrency:                   # P2-a 并发原子预留（第1/3类，启动生
   backend: redis               # redis（默认，D7 原子预留真源）| local（旧事件驱动近似计数）
   fail_open: false             # D5 逃生开关：true=Redis 不可用时回落本地计数放行（默认 fail-close 拒新增）
   lease_ttl: 86400             # 预留凭证 TTL（秒）；正常由挂断/对账释放，TTL 仅防极端泄漏积累
+
+# FS 经 mod_xml_curl 回调 /fs/* 的 HTTP Basic 共享凭据（fail-closed：留空则 /fs/* 全部 401）。
+# 须与 FS 侧 xml_curl.conf.xml 各 binding 的 gateway-credentials（user:password）同值。
+xml_curl:
+  user: <xmlcurl-shared-user>
+  password: <xmlcurl-shared-password>

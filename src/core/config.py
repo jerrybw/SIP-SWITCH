@@ -45,6 +45,17 @@ def _apply_defaults(cfg):
     r.setdefault("backend", "local")  # local（默认，本次落地）| cos（上云阶段）
     cfg["record"] = r
 
+    # xml_curl（第1/3类）：FS 经 mod_xml_curl 回调网关 /fs/* 端点的 HTTP Basic 共享凭据。
+    # 两侧必须同源：FS 侧 deploy.sh 写入 .env（XMLCURL_USER/XMLCURL_PASSWORD），由
+    # docker-entrypoint-fs.sh 渲染进 xml_curl.conf.xml 的 gateway-credentials；
+    # 网关侧在本段。任一侧留空 → /fs/* 一律 401（fail-closed，见 api/app.py _fs_basic_auth_ok）。
+    xc = cfg.get("xml_curl")
+    if not isinstance(xc, dict):
+        xc = {}
+    xc.setdefault("user", "")
+    xc.setdefault("password", "")
+    cfg["xml_curl"] = xc
+
     # redis
     rd = cfg.get("redis")
     if not isinstance(rd, dict):

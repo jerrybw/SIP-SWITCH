@@ -73,6 +73,22 @@ if [ "$existing_deploy" -eq 1 ] && [ "$FORCE" -eq 0 ]; then
     sed -i "s|^default_sip_domain:.*|default_sip_domain: $EXT_SIP_IP|" "$CFG_LIVE"
   fi
   echo "[deploy] 已更新 EXT_SIP_IP=$EXT_SIP_IP (default_sip_domain 同步)。"
+  # 增量补配：xml_curl 回调凭据（安全升级路径）。存量部署的 .env/config 没有这项，
+  # 若不补，升级后 FS 对 /fs/* 全收 401 → 拉不到 dialplan/directory/sofia，通话全断。
+  # 只补缺失项，绝不动已有密钥（幂等；与 §4.1「密钥一次性生成+分发」一致）。
+  if ! grep -q '^XMLCURL_PASSWORD=' "$ENV_LIVE"; then
+    _XU=$(grep -oP '^XMLCURL_USER=\K.+' "$ENV_LIVE" 2>/dev/null || true)
+    _XU=${_XU:-xmlcurl}
+    _XP=$(openssl rand -hex 16)
+    printf '\n# xml_curl 回调凭据（deploy.sh 增量补配；须与 config_settings.yaml [xml_curl] 同值）\nXMLCURL_USER=%s\nXMLCURL_PASSWORD=%s\n' "$_XU" "$_XP" >> "$ENV_LIVE"
+    if grep -q '^xml_curl:' "$CFG_LIVE"; then
+      sed -i -e "s|^\(\s*user:\).*|\1 $_XU|" -e "s|^\(\s*password:\).*|\1 $_XP|" "$CFG_LIVE"
+    else
+      printf '\n# xml_curl 回调凭据（deploy.sh 增量补配）\nxml_curl:\n  user: %s\n  password: %s\n' "$_XU" "$_XP" >> "$CFG_LIVE"
+    fi
+    echo "[deploy] 已补配 xml_curl 回调凭据（.env + config_settings.yaml 同源写入）。"
+    echo "[deploy] ⚠️ 升级后需重建使其生效：docker compose --env-file .env up -d --force-recreate freeswitch gateway"
+  fi
   [ "$UP" -eq 1 ] && docker compose --env-file .env up -d
   exit 0
 fi
@@ -84,6 +100,7 @@ MYSQL_ROOT_PW=$(gen_hex 16)
 MYSQL_PW=$(gen_hex 16)
 ESL_PW=$(gen_hex 16)
 REDIS_PW=$(gen_hex 16)
+XMLCURL_PW=$(gen_hex 16)
 JWT_SECRET=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
 SALT=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
 ADMIN_PW=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9' | head -c 12)
@@ -92,11 +109,12 @@ NODE_UUID=$(python3 -c 'import secrets;print(secrets.token_hex(8))')
 
 # ---------- 3) 渲染 .env（从 .env.example） ----------
 echo "[deploy] 渲染 $ENV_LIVE ..."
-python3 - "$ENV_EXAMPLE" "$ENV_LIVE" "$EXT_SIP_IP" "$MYSQL_ROOT_PW" "$MYSQL_PW" "$ESL_PW" "$REDIS_PW" <<'PY'
+python3 - "$ENV_EXAMPLE" "$ENV_LIVE" "$EXT_SIP_IP" "$MYSQL_ROOT_PW" "$MYSQL_PW" "$ESL_PW" "$REDIS_PW" "$XMLCURL_PW" <<'PY'
 import sys, re
-src, dst, ip, mr, mp, esl, rp = sys.argv[1:8]
+src, dst, ip, mr, mp, esl, rp, xcp = sys.argv[1:9]
 t = open(src).read()
 t = t.replace('change-me-root', mr)   # 先替换更具体的，避免误伤
+t = t.replace('change-me-xmlcurl', xcp)
 t = t.replace('change-me-esl', esl)
 t = t.replace('change-me', mp)
 if 'EXT_SIP_IP=' not in t:
@@ -112,10 +130,11 @@ PY
 
 # ---------- 4) 渲染 config_settings.yaml（从 config.example.yaml） ----------
 echo "[deploy] 渲染 $CFG_LIVE ..."
-python3 - "$CFG_EXAMPLE" "$CFG_LIVE" "$EXT_SIP_IP" "$MYSQL_PW" "$ESL_PW" "$REDIS_PW" "$JWT_SECRET" "$SALT" "$ADMIN_HASH" "$NODE_UUID" <<'PY'
+python3 - "$CFG_EXAMPLE" "$CFG_LIVE" "$EXT_SIP_IP" "$MYSQL_PW" "$ESL_PW" "$REDIS_PW" "$JWT_SECRET" "$SALT" "$ADMIN_HASH" "$NODE_UUID" "$XMLCURL_PW" <<'PY'
 import sys
-src, dst, ip, mp, esl, rp, jwt, salt, ah, node = sys.argv[1:11]
+src, dst, ip, mp, esl, rp, jwt, salt, ah, node, xcp = sys.argv[1:12]
 t = open(src).read()
+t = t.replace('change-me-xmlcurl', xcp)         # 先替换更具体的
 t = t.replace('change-me-esl', esl)          # 先替换更具体的
 t = t.replace('change-me', mp)               # mysql url 里的密码占位
 t = t.replace('<sip-domain>', ip)            # default_sip_domain

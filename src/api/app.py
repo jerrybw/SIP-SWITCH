@@ -31,6 +31,7 @@ from rules.matcher import DIR_CALLER, DIR_CALLEE
 from api.dialplan_xml import (
     build_allow_xml, build_deny_xml, build_empty_xml, build_outbound_xml, _LOCAL_EXT_RE
 )
+from api.fs_auth import fs_basic_auth_ok, FS_BASIC_PATHS
 from esl_client import _resolve_caller_account, _check_balance_allowed
 from esl_client import pre_insert_cdr
 from route.service import select_outbound_gateway, resolve_access_point, resolve_access_points
@@ -75,6 +76,12 @@ async def _auth_guard(request, call_next):
     # /admin 仅承载登录页与前端 JS，不含任何数据；真正的数据经 /api/* 受保护，
     # 由前端 bootAuth() 探 /api/me(401) 后在客户端渲染登录覆盖层。
     path = request.url.path
+    # /fs/* xml_curl 回调：HTTP Basic 共享凭据（安全修复，校验逻辑在 api/fs_auth.py；
+    # app.py 冻结约定下本处仅按 FS_BASIC_PATHS 分流插入，白名单其余行为不变）
+    if path in FS_BASIC_PATHS and not fs_basic_auth_ok(request):
+        return Response("unauthorized", status_code=401,
+                        media_type="text/plain; charset=utf-8",
+                        headers={"WWW-Authenticate": "Basic"})
     if (path in ("/fs/dialplan", "/fs/directory", "/fs/config", "/healthz", "/api/login", "/api/logout")
             or path.startswith("/static/") or path == "/" or path == "/admin"):
         return await call_next(request)
