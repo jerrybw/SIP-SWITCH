@@ -160,6 +160,8 @@ from api.crud import router as crud_router
 from api.auth import get_current_admin, router as auth_router
 from api.billing import router as billing_router
 from api.accounts import router as accounts_router
+from api.cdr_export import router as cdr_export_router  # T-306 扩展点
+from api.oplog import oplog_middleware  # T-301 扩展点
 
 # ---------------------------------------------------------------------------
 # 节点状态 + Webhook 推送（#70 系列：节点健康可视化 + 外部告警落地）
@@ -318,9 +320,13 @@ def cdr_recording(uuid: str, download: int = 0, db: Session = Depends(get_db)):
     raise HTTPException(status_code=404, detail="recording_file_missing")
 
 
+# T-301 操作日志自动埋点（实现见 api/oplog.py，本文件只挂载）
+app.middleware("http")(oplog_middleware)
+
 app.include_router(auth_router)
 app.include_router(billing_router)
 app.include_router(accounts_router)
+app.include_router(cdr_export_router)  # T-306：须在 crud 兜底路由前注册（PITFALLS #34）
 app.include_router(crud_router)
 
 

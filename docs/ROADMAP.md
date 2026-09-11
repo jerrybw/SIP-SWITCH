@@ -398,3 +398,23 @@
 
 **遗留**：① 金额兜底待 mod_xml_cdr 真源（P1）；② 并发预检改实时查询（P2，高并发前做）；
 ③ 对账「欠计」方向（ESL 断连期间新建的呼叫计数缺失）仅观测不修。
+
+## 2026-09-11 工程约定：app.py 冻结 + M3 扩展点拆分（多人并行防冲突）
+
+**背景**：M3 尾巴（角色校验/操作日志/CDR 导出）交给贡献者开发，主线同步做 P2-a（Redis）。
+两边唯一冲突面是 `src/api/app.py`，故按扩展点拆分，把 app.py 变成「只挂一行」的稳定契约。
+
+**拆分内容（commit 本节同批）**：
+- `src/api/authz.py`：角色校验扩展点 —— `require_role(*roles)` 依赖工厂 + `ROLE_NAMES` 口径；
+  当前 `ENFORCE_ROLE=False`（记录不拦截 fail-open），M3 实现角色判定并验证后置 True 全站生效
+- `src/api/oplog.py`：operation_log 自动埋点中间件（已挂载，管理端写操作 POST/PUT/PATCH/DELETE
+  记 operator/action/object/detail，失败不阻塞业务）+ `record_op()` 显式埋点入口
+- `src/api/cdr_export.py`：`GET /api/cdr/export` 基础 CSV 导出（时间范围 + limit≤10万，
+  字段与 /api/cdr 列表对齐；已注册在 crud 兜底路由前，PITFALLS #34）
+- `app.py` 仅 +5 行挂载（import ×2 / middleware ×1 / include_router ×1）
+
+**约定**：贡献者**不得修改 `src/api/app.py`**；所有 M3 逻辑在上述三个文件内实现；
+需改 app.py 或扩展点接口签名时，先与维护者同步评估。app.py 改动权归维护者。
+
+**验证**：py_compile + pytest 15 passed；真机冒烟 —— 登录 ✅ / CDR 导出 CSV ✅ /
+dialplan 出局 ✅ / oplog 自动埋点落库 ✅（webhook-test 401 亦被记录为 anonymous）。
