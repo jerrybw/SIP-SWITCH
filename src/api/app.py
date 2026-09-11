@@ -12,14 +12,14 @@ P3：管理端 REST CRUD（api/crud）+ Jinja 管理页（/admin）。
 import os
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
-from fastapi.responses import Response, RedirectResponse, JSONResponse
+from fastapi.responses import Response, RedirectResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 import re
 
-from core.config import settings
+from core.config import settings, NODE_UUID, RECORD_ROOT, RECORD_BACKEND
 from db.session import get_db
 from db.models import Cdr, AccessPoint, Gateway, SipPhone, FsNode
 from rules.service import (
@@ -37,6 +37,7 @@ from esl_client import get_concurrency
 from api.directory_xml import fs_directory
 from fs_sofia_config import build_config_response
 from alerting import push_webhook
+import recordings
 
 app = FastAPI(title="SIP Switch Gateway API", version="0.2.0")
 
@@ -136,6 +137,21 @@ def list_cdr_api(page: int = Query(1, ge=1),
     rows = db.scalars(qq).all()
     cols = Cdr.__table__.columns
     items = [{c.name: getattr(r, c.name) for c in cols} for r in rows]
+    # #70：录音列除了「有没有录」还要知道「文件是否真的在盘上」——卷没挂好 / 容器重建丢文件时
+    # 要显性提示，而不是等用户点播放才 404。只对 record_status=1 的行做一次本地 stat
+    # （网关与 FS 共享只读卷，开销可忽略）；任何异常都不许影响话单查询本身。
+    for it in items:
+        if int(it.get("record_status") or 0) == 1:
+            try:
+                # 存量裸路径没有 authority 段，按该条 CDR 自己的 fs_node_uuid 归属
+                # （不是一律按当前节点 —— 多节点下 node2 录的音不能在 node1 上找）。
+                st = recordings.stat_local(it.get("record_path"), RECORD_ROOT,
+                                           it.get("fs_node_uuid") or NODE_UUID,
+                                           local_node=NODE_UUID)
+                it["record_ok"] = bool(st["exists"])
+                it["record_remote"] = bool(st["remote"])
+            except Exception:
+                pass
     return {"items": items, "page": page, "page_size": page_size,
             "total": total, "total_pages": tp}
 from api.crud import router as crud_router
@@ -191,6 +207,91 @@ def provision_resync_all():
     seq = force_all_nodes_rescan()
     return {"ok": True, "seq": seq,
             "note": "本节点已立即重建；其它节点最迟一个轮询周期后跟上"}
+
+
+# ---------------------------------------------------------------------------
+# #70 录音回放 / 下载（FS 写、网关只读回源）
+# 端点契约对前端是**稳定**的：本地阶段返回文件流，上云阶段返回 302 到对象存储签名直链，
+# 前端与 CDR 表结构都不用改 —— 这正是 URI 抽象的收益。
+# 必须注册在 crud_router 之前：crud 的 /api/{entity} 兜底路由会吞掉 /api/*（PITFALLS #34）。
+# ---------------------------------------------------------------------------
+def _load_recording_row(db, uuid: str):
+    return db.execute(
+        select(Cdr.uuid, Cdr.record_status, Cdr.record_path, Cdr.fs_node_uuid)
+        .where(Cdr.uuid == uuid)
+    ).first()
+
+
+def _rec_node(row) -> str:
+    """本条 CDR 的录音归属节点。存量裸路径没有 authority 段，靠 cdr.fs_node_uuid 补
+    （只在 legacy 分支用得到；URI 里已有 authority 时以 URI 为准）。"""
+    return getattr(row, "fs_node_uuid", None) or NODE_UUID
+
+
+@app.get("/api/cdr/{uuid}/recording/meta")
+def cdr_recording_meta(uuid: str, db: Session = Depends(get_db)):
+    """录音元信息：供前端决定按钮形态（▶ 播放 / ⚠ 缺失）与展示定位信息。"""
+    row = _load_recording_row(db, uuid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="cdr_not_found")
+    stored = row.record_path or ""
+    node = _rec_node(row)
+    info = recordings.resolve(stored, RECORD_ROOT, node, local_node=NODE_UUID)
+    st = recordings.stat_local(stored, RECORD_ROOT, node, local_node=NODE_UUID)
+    return {
+        "uuid": uuid,
+        "record_status": int(row.record_status or 0),
+        "record_uri": info["uri"],
+        "scheme": info["scheme"],
+        "backend": RECORD_BACKEND,
+        "node_uuid": info["authority"],
+        "legacy": info["legacy"],
+        "remote": st["remote"],
+        "exists": st["exists"],
+        "size": st["size"],
+    }
+
+
+@app.get("/api/cdr/{uuid}/recording")
+def cdr_recording(uuid: str, download: int = 0, db: Session = Depends(get_db)):
+    """录音回源：本地流式（支持 Range → 可拖动进度）+ `?download=1` 附件下载。
+
+    分支：无录音 → 404；上云 → 302 签名直链；录音在别的节点 → 409；
+    文件缺失 → 404（**不是 500**），让前端显性提示「文件缺失」而不是静默失败。
+    """
+    row = _load_recording_row(db, uuid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="cdr_not_found")
+    stored = row.record_path or ""
+    if not stored or not int(row.record_status or 0):
+        raise HTTPException(status_code=404, detail="no_recording")
+
+    # 上云阶段：302 到对象存储签名直链（public_url 目前恒返回 None，契约先固化在此）
+    url = recordings.public_url(stored, settings.get("record") or {})
+    if url:
+        return RedirectResponse(url, status_code=302)
+
+    info = recordings.resolve(stored, RECORD_ROOT, _rec_node(row), local_node=NODE_UUID)
+    if info["scheme"] == recordings.SCHEME_COS:
+        raise HTTPException(status_code=503, detail="object_storage_not_configured")
+    path = info["path"]
+    if path and os.path.isfile(path):
+        # FileResponse 自带 Range 支持（Accept-Ranges: bytes / 206），音频可拖动播放；
+        # 传 filename 即自动附 Content-Disposition: attachment。
+        if download:
+            return FileResponse(path, media_type="audio/wav",
+                                filename=info["name"] or (uuid + ".wav"))
+        return FileResponse(path, media_type="audio/wav")
+    if info["remote"]:
+        # 读不到 **且** 归属别的节点 → 409 告知去哪拿（比裸 404 有信息量）。
+        # 注：录音目录是共享挂载，别的节点的文件在本节点通常**也读得到**（走上面的 200 分支）；
+        # 真正落到这里的场景是真·多机（P3 多 FS 各自本地盘）。届时把这里改成
+        # 302 跳到该节点的同名端点即可，前端不用动。
+        return JSONResponse(
+            {"error": "recording_on_other_node", "node_uuid": info["authority"],
+             "hint": "录音归属节点 %s 且本节点不可达" % info["authority"]},
+            status_code=409)
+    raise HTTPException(status_code=404, detail="recording_file_missing")
 
 
 app.include_router(auth_router)

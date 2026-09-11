@@ -21,6 +21,11 @@ fi
 RTP_START="${RTP_START:-20000}"
 RTP_END="${RTP_END:-20100}"
 
+# #70 录音目录：compose 把宿主 ./data/recordings 挂到这里（容器内固定 /recordings）。
+# 未挂卷时也建出来，避免 dialplan 指向的路径不存在导致 record_session 静默失败。
+RECORD_DIR="${RECORD_DIR:-/recordings}"
+mkdir -p "${RECORD_DIR}" || echo "[entrypoint] WARN: 无法创建录音目录 ${RECORD_DIR}" >&2
+
 mkdir -p "$FS_CONF_DIR/autoload_configs" "$FS_CONF_DIR/sip_profiles/external"
 
 # 1) 渲染配置：占位符 -> 环境变量

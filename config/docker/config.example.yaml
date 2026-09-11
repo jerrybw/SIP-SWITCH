@@ -16,7 +16,6 @@ esl:
   password: change-me-esl       # 必须与 .env 的 ESL_PASSWORD 一致
   reconnect_interval: 5
   fs_node_uuid:
-  recordings_dir: /var/lib/freeswitch/recordings
 
 api:
   host: 0.0.0.0
@@ -45,10 +44,16 @@ auth:
 node:
   uuid: __NODE_UUID__
 
-# ---- 录音（第1类；URI 抽象由 #70 实现）----
+# ---- 录音（第1类；#70 录音 URI 抽象已落地）----
+# 两个「视图」刻意拆开：FS 与网关各有自己的文件系统，`/recordings` 只是二者共享的挂载点。
+#   dir        —— **FS 视角**的写入根，写进 dialplan；实际落 /<dir>/<node_uuid>/<uuid>.wav
+#   local_root —— **网关视角**的读取根，解析 local://<node_uuid>/<file> 时拼路径做回源
+# ⚠️ 改这两个值必须同步改 docker-compose.yml 里录音卷的容器侧挂载点，否则两边对不上；
+#    单机部署保持默认（compose 已把宿主 ./data/recordings 挂到 /recordings）即可。
 record:
-  dir: /var/lib/freeswitch/recordings
-  backend: local            # local（默认）| s3（预留，未实现）
+  dir: /recordings
+  local_root: /recordings
+  backend: local            # local（默认，本期落地）| cos（上云阶段：对象存储签名直链）
 
 # ---- Redis（Phase1 基础设施，DEP-2 强制）----
 # 省略 / 留空 = 使用 compose 服务名 redis:6379（容器 Redis，最常用）

@@ -16,7 +16,7 @@
 |---|---|---|---|---|
 | M1 核心通话（T-101~107） | 7 | 0 | 0 | 含录音；M1 尾巴（默认口令治理）已闭合 |
 | M2 路由与多落地（T-201~208） | 8 | 0 | 0 | **全部完成**（tdrive 计划文档仍标未开始，已滞后） |
-| M3 Web 管理端（T-301~307） | 5 | 2 | 0 | 缺口：角色校验 / 操作日志 / CDR 导出+录音下载 |
+| M3 Web 管理端（T-301~307） | 5 | 2 | 0 | 缺口：角色校验 / 操作日志 / CDR 导出（录音下载/播放已闭环 #70） |
 | 二期计费（P2-1~4） | 2 | 1 | 1 | 代码超前于计划；防欺诈未做 |
 | 工程 P2-a/b/c | 0 | 1 | 2 | 受 Redis 未引入阻塞，见 §6 时序铁律 |
 | 集群高可用（T-501~504） | 1 | 1 | 3 | #69 FS 节点健康检查已落地（探测+落库+告警）；多节点分发仍无 |
@@ -67,10 +67,10 @@
 | T-303 | 落地管理页 | ✅ | `gateway` / `carrier` CRUD |
 | T-304 | 路由配置页 | ✅ | `prefix_route` |
 | T-305 | 实时监控仪表盘 | ✅ | `/monitor/summary` + `/api/stats/concurrency` |
-| T-306 | CDR 查询/导出/录音下载 | ⚠️ | ✅ 查询 `/cdr` `/cdr/{uuid}` `/api/cdr`；**❌ CDR 导出、录音下载/播放未做** |
+| T-306 | CDR 查询/导出/录音下载 | ⚠️ | ✅ 查询 `/cdr` `/cdr/{uuid}` `/api/cdr`；**✅ 录音播放/下载（#70，2026-09-11）**：`GET /api/cdr/{uuid}/recording`（文件流+Range 206，支持 `?download=1`）+ `/recording/meta`；录音改 URI 抽象 `local://<node_uuid>/<file>`，共享卷 `./data/recordings`；**❌ CDR 导出未做** |
 | T-307 | 系统设置 | ✅ | `/sys-config` + `system_setting` |
 
-**M3 三个真实缺口**：角色校验（安全）· 操作日志 · CDR 导出 + 录音下载
+**M3 真实缺口**：角色校验（安全）· 操作日志 · CDR 导出 ｜ **录音下载/播放已闭环（#70，2026-09-11）**
 
 ## 5. 二期计费（需求口径） — 2 完成 / 1 部分 / 1 未开始
 
@@ -254,3 +254,45 @@
 ### 4. chore: 纪律更新 —— 待办只认 ROADMAP
 
 - 用户拍板：**忽略 wb-issues 看板的「待开始」7 项，今后待办事实来源只认本 ROADMAP**。已写入 `.workbuddy/memory/MEMORY.md`。
+
+
+## 2026-09-11 修复记录（dev 验证通过，**代码待提交**）
+
+### #70 录音 URI 抽象（落地 `local://`，预留 `cos://`）— 闭环 M3 T-306「录音下载/播放」
+
+**背景**：T-306「录音下载/播放」此前未做；且录音落点写死在容器内 `${recordings_dir}/${uuid}.wav`（FS 本地路径），CDR 只存裸文件名——既无法定位到具体节点，也无法平滑上云。
+
+**决策（设计文档见工作区 `设计方案-录音URI抽象-v1.md`，用户 2026-09-11 拍板 4 项）**：
+
+1. **不加列**：`cdr.record_path` 由「裸文件名」升格为 **URI**（老裸路径按 `local://<归属node_uuid>/<file>` 隐式解释），不为 URI 另开列。
+2. **多节点先 409**：请求他节点录音且本节点**不可达**时返回 409（`recording_remote_node`），不静默 404；若共享卷可达则正常 200。
+3. **上云幂等键**（设计内）：cos 对象键 = `<prefix>/<uuid>.wav`，天然幂等；本期仅预留 `public_url` 接口，不实装。
+4. **本期不转码**：录音保持 FS 原始 wav，不引入转码。
+
+**URI 形制（三段式）**：`<scheme>://<authority>/<name>`
+
+- 本地：`local://<node_uuid>/<file>`（authority = **归属节点**，便于定位/排障/前端告警）
+- 上云：`cos://<bucket>/<prefix>/<file>`（**仅换 scheme**，前端 / CDR / 端点契约零改）
+- 老数据：裸文件名 → 隐式 `local://`，authority 取该行 `cdr.fs_node_uuid`（缺失则不补）
+
+**代码证据**：
+
+- `src/recordings.py`（新增）：纯函数无 DB 依赖 —— `is_uri / to_uri / parse / resolve / stat_local / public_url`（cos 恒 `remote=False`）。
+- `src/core/config.py`：`record.dir`（默认 `/recordings`）/`record.local_root`/`record.backend` 落地为模块级 `RECORD_DIR/RECORD_ROOT/RECORD_BACKEND`（**死配置复活**，与 #53 同型）。
+- `src/api/dialplan_xml.py`：录音落点改固定挂载点 `RECORD_DIR/<NODE_UUID>`。
+- `src/esl_client.py`：CDR `record_path` 落库改 `to_uri(rec_file, NODE_UUID)`，upsert 幂等兜底同样 to_uri。
+- `src/api/app.py`（路由注册在 `crud_router` **之前**，#34）：`GET /api/cdr/{uuid}/recording/meta`、`GET /api/cdr/{uuid}/recording`（`public_url` 非空→302 签名直链；`resolve` 后 `os.path.isfile`→FileResponse（Starlette 自带 Range 206），`?download=1` 带 `Content-Disposition`；文件缺失且 `remote`→409；否则 404）。CDR list 对 `record_status=1` 行附 `record_ok/record_remote`。
+- `src/static/admin.js`（`?v=20260911a`）：CDR 列新增 `_rec` 虚拟列（播放/下载/缺失/异节点四态）+ `playRecording` 弹层；`CDR_FORCE_PUSH` 强推给老用户（解决列固化不可见）。
+- `docker-compose.yml` / `docker-compose.override.yml`：fs/gateway/fs2/gateway2 同挂 `./data/recordings`（FS rw、网关 ro），按 `/<root>/<node_uuid>/` 分片 → 容器重建不丢、多节点共享。
+- `deploy/fs-config/docker-entrypoint-fs.sh`：启动 `mkdir -p ${RECORD_DIR:-/recordings}`；`config/docker/config.example.yaml` 增 record 段；`.gitignore` 加 `/data/`。
+
+**验证（单测 + 端到端）**：
+
+- `recordings.py` 单测全过（含 cos 恒 `remote=False`、共享卷可达不误判 remote 两处修正）。
+- **31 个存量 wav**（fs1 20 + fs2 11）从容器可写层 `docker cp` 迁到 `data/recordings/<node_uuid>/`，md5 一致。
+- **真实呼叫** CDR 66 落 `local://2a5f89f1b0f0ce74/2d5e3025-….wav`，宿主盘出现同名文件（录音链路真正闭环）。
+- **API 6/6**：meta / 流式 / Range 206 / download / 存量兼容 / 未录音 404 / 未知 404 / 文件缺失 404（**非 500**）/ 异节点 409。
+- **持久性回归**：`docker compose up --force-recreate freeswitch` 后录音 md5 不变、API 仍 200。
+- 前端 11/11（`fmtRecCell` 四态 + 列定义 + `playRecording` + `closeModal` 恢复）。
+
+**交付（2026-09-11）**：本项代码已提交并推送远端（`feat(#70): 录音 URI 抽象 local:// + 录音下载/播放闭环（T-306）`）；推送前已过 `git-push-secret-scan`（真实 IP / 密钥 0 命中）。

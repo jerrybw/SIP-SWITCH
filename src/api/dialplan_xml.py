@@ -9,6 +9,13 @@ T-202 新增 build_outbound_xml（section description="sip-gateway-outbound"，�
 
 import re
 
+from core.config import RECORD_DIR, NODE_UUID
+
+# #70 录音落点：`<record.dir>/<node_uuid>/<uuid>.wav`（#70 前用的是 FS 内置 ${recordings_dir}）。
+# 带节点目录是刻意的 —— 与录音 URI 的 authority 段一一对应（local://<node_uuid>/<file>），
+# 多节点共挂同一目录时天然分片；`record.dir` 由此从死配置变成真读点。
+_REC_DIR = "%s/%s" % (RECORD_DIR.rstrip("/"), NODE_UUID)
+
 
 def _act(app: str, data: str) -> str:
     # 必须输出合法的自闭合标签 "<action .../>"，否则 FS 无法解析动作。
@@ -53,7 +60,7 @@ def build_allow_xml(callee: str, access_point_id=None, bill_unit=60, caller_type
     access_point_id / bill_unit 由路由层解析接入点后透传，供 CDR 关联（T-207）。
     account_id：话机注册呼叫（无接入点）时显式下发归属账户，使内线互拨也能落 account_id 并计费。
     """
-    rec = "rec_file=${recordings_dir}/${uuid}.wav"
+    rec = "rec_file=%s/${uuid}.wav" % _REC_DIR
     rec_session_data = "${rec_file}"
     ringback = "${us-ring}"
     transfer_ringback = "${hold_music}"
@@ -259,7 +266,7 @@ def build_outbound_xml(callee: str, candidates: list, gateway_id=None, carrier_i
 
     rec = []
     if record_enabled:
-        r = "rec_file=${recordings_dir}/${uuid}.wav"
+        r = "rec_file=%s/${uuid}.wav" % _REC_DIR
         rec_session_data = "${rec_file}"
         rec.append("          " + _act('set', r))
         rec.append("          " + _act('record_session', rec_session_data))

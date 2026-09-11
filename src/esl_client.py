@@ -21,6 +21,7 @@ from decimal import Decimal
 from fs_esl_socket import ESLConnection as ESLconnection
 
 from core.config import settings, NODE_UUID
+from recordings import to_uri
 from db.session import SessionLocal
 from db.models import Cdr, SipPhone, AccessPoint, Account, Business, Gateway, Carrier, AccountLedger, CarrierLedger
 from sqlalchemy import select, update
@@ -262,7 +263,11 @@ def handle_event(event) -> None:
             switch_detail=cdr_sd,
         )
         if rec_file:
-            _upsert_call(leg_uuid, record_status=1, record_path=rec_file)
+            # #70：FS 上报的是**容器内绝对路径**，落库前统一转成可迁移 URI
+            # （local://<node_uuid>/<file>）。列名 record_path 保留，语义升格为 URI，
+            # 老数据是裸路径 → 读取端按隐式 local:// 兼容，故无需 migration。
+            _upsert_call(leg_uuid, record_status=1,
+                         record_path=to_uri(rec_file, NODE_UUID))
         # 同步给对端腿（被合并的 B-leg），保证其落库前也能带上这些值。
         if other_uuid and other_uuid != leg_uuid:
             _upsert_call(
@@ -279,7 +284,8 @@ def handle_event(event) -> None:
                 switch_detail=cdr_sd,
             )
             if rec_file:
-                _upsert_call(other_uuid, record_status=1, record_path=rec_file)
+                _upsert_call(other_uuid, record_status=1,
+                             record_path=to_uri(rec_file, NODE_UUID))
         # P2 并发计数：仅对主(A)腿计数，下游(B)腿跳过（避免双计）。
         if not is_b_leg:
             _maybe_count_leg(leg_uuid)
@@ -542,7 +548,9 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         switch_count=switch_count,
         switch_detail=switch_detail,
         record_status=rec.get("record_status", 0),
-        record_path=rec.get("record_path"),
+        # #70：兜底再规范一次（to_uri 幂等）。正常路径上 record_path 在采集时已是 URI，
+        # 这里只是保证「无论从哪条分支写入」落库值都符合契约。
+        record_path=to_uri(rec.get("record_path"), NODE_UUID),
         cost=cost,
         rate_used=rate_used,
         # v0.3 成本侧落库（与收入同事务算出）

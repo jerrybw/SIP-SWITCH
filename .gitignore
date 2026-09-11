@@ -8,6 +8,8 @@ __pycache__/
 
 # ===== Runtime / data =====
 cdr_spool/
+# #70 录音运行时数据（FS 写入、网关只读回源）—— 严禁入库
+/data/
 *.db
 *.sqlite3
 *.log
@@ -31,3 +33,8 @@ dev_history/
 .env.*
 !.env.example
 config/docker/config_settings.yaml
+
+# ===== dev 多节点覆盖 / node2 专属配置（含真实宿主 IP，严禁入库）=====
+docker-compose.override.yml
+deploy/fs-config/node2/
+config/node2/

@@ -658,6 +658,7 @@ async function openForm(key, id) {
     }
   }
   document.getElementById('modal-title').textContent = (isEdit ? '编辑' : '新增') + ' · ' + sec.label;
+  document.getElementById('modal-save').style.display = '';  // #70：防播放弹层残留隐藏状态
   document.getElementById('modal').classList.remove('hidden');
 }
 window.openForm = openForm;
@@ -823,7 +824,11 @@ async function syncOwnerRules(ownerType, ownerId, desired) {
   }
 }
 
-function closeModal() { document.getElementById('modal').classList.add('hidden'); }
+function closeModal() {
+  document.getElementById('modal').classList.add('hidden');
+  // #70：播放弹层会隐藏「保存」按钮（见 playRecording），关闭时恢复，供表单复用同一弹层。
+  document.getElementById('modal-save').style.display = '';
+}
 document.getElementById('modal-close').onclick = closeModal;
 document.getElementById('modal-cancel').onclick = closeModal;
 
@@ -863,16 +868,18 @@ var CDR_COLS = [
   {k:'cost_price', t:'成本(元)'}, {k:'cost_rate_used', t:'成本费率(元/单位)'}, {k:'cost_bill_unit', t:'成本计费单位'}, {k:'profit', t:'毛利(元)'},
   {k:'hangup_cause', t:'挂断原因'}, {k:'hangup_direction', t:'挂断方向'}, {k:'sip_code', t:'SIP码'}, {k:'sip_invite_failure_status', t:'邀请失败'},
   {k:'reject_reason', t:'拒绝原因'}, {k:'switch_count', t:'切换次数'}, {k:'switch_detail', t:'切换明细'},
-  {k:'record_status', t:'录音状态'}, {k:'record_path', t:'录音路径'},
+  {k:'record_status', t:'录音状态'}, {k:'_rec', t:'录音'}, {k:'record_path', t:'录音URI'},
   {k:'fs_node_uuid', t:'FS节点'}, {k:'created_at', t:'创建时间'}
 ];
 var CDR_DIR_TEXT = { 0: '服务器', 1: '主叫', 2: '被叫', 3: '其他' };
 function fmtBJ(v){if(v===null||v===undefined||v==='')return v;var t=String(v).replace(' ','T');if(!/Z|[+-]\d\d:?\d\d$/.test(t))t+='Z';var d=new Date(t);if(isNaN(d.getTime()))return String(v);var b=new Date(d.getTime()+8*3600*1000);var p=function(n){return(n<10?'0':'')+n;};return b.getUTCFullYear()+'-'+p(b.getUTCMonth()+1)+'-'+p(b.getUTCDate())+' '+p(b.getUTCHours())+':'+p(b.getUTCMinutes())+':'+p(b.getUTCSeconds());}
 var CDR_TIME_KEYS=['start_time','ring_time','answer_time','end_time','created_at'];
 // 话单默认显示列：账户/接入点/落地网关/运营商按 id 存储、渲染时映射为名称（fmtCdrCell）。
-var CDR_DEFAULT_COLS = ['uuid','caller_in','callee_in','account_id','access_point_id','gateway_id','carrier_id','start_time','end_time','talk_duration','cost','rate_used','cost_price','cost_rate_used','cost_bill_unit','profit','hangup_cause','hangup_direction','record_status','source_ip','source_port','dest_ip','dest_port'];
-// 存量 localStorage.cdr_cols 强制补列（改 CDR_COLS 定义对老用户无效，须 push 回写才可见）。
-var CDR_FORCE_PUSH = ['account_id','access_point_id','carrier_id','source_ip','source_port','dest_ip','dest_port','hangup_direction','cost','rate_used','cost_price','cost_rate_used','cost_bill_unit','profit'];
+var CDR_DEFAULT_COLS = ['uuid','caller_in','callee_in','account_id','access_point_id','gateway_id','carrier_id','start_time','end_time','talk_duration','cost','rate_used','cost_price','cost_rate_used','cost_bill_unit','profit','hangup_cause','hangup_direction','_rec','record_status','source_ip','source_port','dest_ip','dest_port'];
+// #70：`_rec` 是**虚拟列**（非 DB 列，由 fmtRecCell 渲染 ▶/⬇）。已有 localStorage.cdr_cols 的
+// 老用户看不到新列，故必须 push 回写（该机制就是为此而设）。`record_path` 已从默认列移除
+// ——它是容器内绝对路径/URI，默认铺开无意义，仍留在 CDR_COLS 里可手动勾选。
+var CDR_FORCE_PUSH = ['_rec','account_id','access_point_id','carrier_id','source_ip','source_port','dest_ip','dest_port','hangup_direction','cost','rate_used','cost_price','cost_rate_used','cost_bill_unit','profit'];
 
 // 切换明细格式化：把 switch_detail(JSON 数组)渲染成「网关名(出局号) → 失败码」可读列表，
 // gateway_id 经 /api/gateways 映射成网关名。原始值可能是字符串(JSON)或已解析数组。
@@ -971,6 +978,47 @@ function fmtCdrCell(k, v) {
   return String(v).replace(/</g, '&lt;');
 }
 
+// #70 录音列（虚拟列）：录音状态 + 文件是否真在盘上（后端 list 已附 record_ok / record_remote）。
+// 刻意把「文件缺失」显性化 —— 卷没挂好、或录音随容器重建丢失时，用户应看到 ⚠，
+// 而不是点了播放才吃 404。
+function fmtRecCell(r) {
+  var st = Number(r.record_status || 0);
+  if (st !== 1 || !r.record_path) return '<span class="muted">—</span>';
+  if (r.record_remote === true) {
+    return '<span class="muted" title="录音在其它节点的本地盘">☁ 异节点</span>';
+  }
+  if (r.record_ok === false) {
+    return '<span style="color:#b45309" title="' + escapeAttr(String(r.record_path)) + '">⚠ 文件缺失</span>';
+  }
+  var u = String(r.uuid || '');
+  return '<button class="btn btn-sm act-rec-play" data-uuid="' + escapeAttr(u) + '">▶ 播放</button> ' +
+         '<a class="btn btn-sm" href="/api/cdr/' + encodeURIComponent(u) + '/recording?download=1">⬇ 下载</a>';
+}
+
+// 播放弹层：复用页面既有的 #modal。preload="none" 避免列表页一次性预载全部录音；
+// <audio> 的 error 事件兜住「后端 404」→ 在弹层里显性提示，而不是静默无声。
+// 端点 /api/cdr/{uuid}/recording 对前端是**稳定契约**：本地阶段返回文件流，
+// 上云阶段 302 到对象存储签名直链 —— 本函数一行都不用改。
+function playRecording(uuid) {
+  var mb = document.getElementById('modal-body');
+  document.getElementById('modal-title').textContent = '录音回放';
+  mb.innerHTML = '<div style="padding:4px 0">' +
+    '<audio id="rec-audio" controls preload="none" style="width:100%" src="/api/cdr/' +
+    encodeURIComponent(uuid) + '/recording"></audio></div>' +
+    '<div id="rec-hint" class="muted" style="margin-top:10px;font-size:12px;word-break:break-all">CDR ' +
+    escapeAttr(uuid) + '</div>' +
+    '<div style="margin-top:12px"><a class="btn btn-sm" href="/api/cdr/' +
+    encodeURIComponent(uuid) + '/recording?download=1">⬇ 下载 WAV</a></div>';
+  var a = document.getElementById('rec-audio');
+  if (a) a.addEventListener('error', function () {
+    var h = document.getElementById('rec-hint');
+    if (h) h.innerHTML = '<span style="color:#b45309">⚠ 无法加载录音：文件缺失、录音卷未挂载，或录音在其它节点</span>';
+  });
+  document.getElementById('modal-save').style.display = 'none';  // 播放弹层没有「保存」
+  document.getElementById('modal').classList.remove('hidden');
+}
+window.playRecording = playRecording;
+
 function renderCdr(key, st) {
   st = st || { page: 1, page_size: 50 };
   var flt = JSON.parse(localStorage.getItem('cdr_filter') || '{}');
@@ -1017,6 +1065,8 @@ function renderCdr(key, st) {
       var head = '<tr>' + shown.map(function(k){ var col = CDR_COLS.find(function(x){return x.k===k;}); return '<th>'+(col?col.t:k)+'</th>'; }).join('') + '</tr>';
       var bodyRows = rows.map(function(r){
         return '<tr>' + shown.map(function(k){
+          // #70：`_rec` 是虚拟列，需要整行上下文（uuid/record_status/record_ok），不走 fmtCdrCell。
+          if (k === '_rec') return '<td>'+fmtRecCell(r)+'</td>';
           var v = r[k];
           if (CDR_TIME_KEYS.indexOf(k) >= 0 && v) v = fmtBJ(v);
           return '<td>'+fmtCdrCell(k, v)+'</td>'; }).join('') + '</tr>';
@@ -1027,6 +1077,11 @@ function renderCdr(key, st) {
       document.getElementById('cdr_reset_btn').onclick = cdrReset;
       document.getElementById('cdr_cols_btn').onclick = cdrToggleCols;
       if (window._cdrColsOpen) document.getElementById('cdr_apply_btn').onclick = cdrApplyCols;
+      // #70：录音播放按钮（表格是 innerHTML 拼的，用绑定而非内联 onclick）
+      var _recBtns = c.querySelectorAll('.act-rec-play');
+      for (var _i = 0; _i < _recBtns.length; _i++) {
+        _recBtns[_i].onclick = (function (b) { return function () { playRecording(b.getAttribute('data-uuid')); }; })(_recBtns[_i]);
+      }
       renderPager(key, data);
     }).catch(function(e){ toast('话单查询失败：'+e.message, true); });
   });

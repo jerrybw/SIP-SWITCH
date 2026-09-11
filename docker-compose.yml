@@ -58,6 +58,9 @@ services:
       - "${RTP_RANGE:-20000-20100}:${RTP_RANGE:-20000-20100}/udp"
     volumes:
       - ./deploy/fs-config:/fs-config:ro
+      # #70 录音：FS 写、网关只读回源，两者挂同一宿主目录（容器重建录音不丢）。
+      # 容器内固定 /recordings（= record.dir 默认值）；录音实际落在 /recordings/<node_uuid>/ 下。
+      - ./data/recordings:/recordings
     entrypoint: ["/fs-config/docker-entrypoint-fs.sh"]
     command: ["sh", "-c", "exec ${FS_COMMAND}"]
     networks:
@@ -78,6 +81,8 @@ services:
       - ./config/docker:/app/config:ro
       # 机制 A：只读挂载 FS 配置，供网关应用动态生成 sofia.conf（网关不落盘）
       - ./deploy/fs-config:/fs-config-ro:ro
+      # #70 录音回源：只读挂同一录音目录（/api/cdr/{uuid}/recording 直接流式读本地文件）
+      - ./data/recordings:/recordings:ro
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
