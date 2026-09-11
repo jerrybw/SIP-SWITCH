@@ -25,7 +25,8 @@ def test_build_allow_xml_contains_bridge_and_record():
     _assert_well_formed(xml, "build_allow_xml")
     assert '<action application="bridge"' in xml
     assert "record_session" in xml
-    assert "${recordings_dir}" in xml
+    assert "rec_file=" in xml  # #70: 录音落点已从 ${recordings_dir} 改为 record.dir/<node_uuid>/
+    assert "${uuid}.wav" in xml
     assert 'name="default"' in xml  # context 必须嵌在 default，否则 FS 找不到路由
 
 
