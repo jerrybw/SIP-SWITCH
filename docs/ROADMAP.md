@@ -418,3 +418,32 @@
 
 **验证**：py_compile + pytest 15 passed；真机冒烟 —— 登录 ✅ / CDR 导出 CSV ✅ /
 dialplan 出局 ✅ / oplog 自动埋点落库 ✅（webhook-test 401 亦被记录为 anonymous）。
+
+## 2026-09-12 M3 范围补录：用户管理（用户拍板，两阶段）
+
+**背景**：sys_user 表存在但 0 行，登录走 config yaml（auth.admin_password_hash），
+role 列无实际意义。用户管理是角色体系成立的前提，纳入 M3（T-301 深化）。
+
+### Phase 1（本期交付）
+
+1. **角色三档（默认约定）**：`viewer`(只读) / `admin`(业务管理) / `super`(用户管理+系统设置)；
+   口径落在 `api/authz.py` ROLE_NAMES，硬校验开关 `ENFORCE_ROLE` 在用户管理验证后置 True
+2. **登录切 DB**：login 查 `sys_user`（username + password_hash + status=1）；
+   config 的 admin 降级为**首次启动种子**——migrate 阶段若 sys_user 空表则按 config
+   写入一条 super admin（此后改密码走系统，不改配置文件）
+3. **用户 CRUD**：新建 `api/users.py`（创建用户/重置密码/启用停用/角色分配），
+   密码哈希特处理，不走 crud 兜底；仅 super 可操作
+4. **前端**：用户管理页 + 按角色显隐（admin.js 归 M3 独占）
+
+### Phase 2（后续迭代，需新增 schema → 走 migrate.py 报备流程）
+
+- **自定义角色**：仅 super 可创建/编辑角色并授权
+- **权限矩阵**：分类、分功能点设置 只读/可写（功能点按管理端模块枚举，
+  清单在 Phase 2 设计评审时定稿）
+
+### 协调约定（与「app.py 冻结」同批，多人并行）
+
+- `src/api/app.py` 冻结：贡献者不得修改；需改先与维护者同步评估
+- `migrate.py`：改动先报备（两边都往尾部追加，串行合入；后合方 rebase）
+- 前端（admin.js + templates）：M3 独占；P2-a 不动前端
+- `templates/index.html` 缓存版本号：由最后合入 main 的一方 bump 一次
