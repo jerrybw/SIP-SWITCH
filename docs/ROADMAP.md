@@ -19,7 +19,7 @@
 | M3 Web 管理端（T-301~307） | 5 | 2 | 0 | 缺口：角色校验 / 操作日志 / CDR 导出（录音下载/播放已闭环 #70） |
 | 二期计费（P2-1~4） | 2 | 1 | 1 | 代码超前于计划；防欺诈未做 |
 | 工程 P2-a/b/c | 0 | 1 | 2 | 受 Redis 未引入阻塞，见 §6 时序铁律 |
-| 集群高可用（T-501~504） | 1 | 1 | 3 | #69 FS 节点健康检查已落地（探测+落库+告警）；多节点分发仍无 |
+| 集群高可用（T-501~504） | 1 | 1 | 3 | #69 FS 节点健康检查已落地（探测+落库+告警）；**心跳超时判定 B1+B2 已修（#73，僵尸在线闭环）**；多节点分发仍无 |
 | M4 容量验证（T-401~404） | 0 | 0 | 4 | **上生产硬门槛，未开始** |
 | P3 注册视图+多 FS | — | 1 | 1 | 注册目录已做，多 FS 未做 |
 | P4 xml_curl+上云 | — | 1 | 1 | xml_curl 已用，上云未做 |
@@ -127,7 +127,7 @@
 | **并发打标（可追溯性）** | ✅ **已完成（2026-09-10）** | 复用 `switch_detail` 扩展字段（**未加新列**）：元素由 `gid:callee_out:cause` 扩为 `gid:callee_out[:conc_gw[:conc_limit]]:cause`，记录该腿**进入时**的并发快照；单候选路径同样打标（`_single_leg_detail`）；解析端 `esl_client._parse_switch_detail` 改**从右往左**解析以兼容老 3 段记录；前端 `fmtSwitchDetail` 追加 `[并发 x/上限y]` 标注。并发 503 的 `reject_reason` 亦改为机器可读串 `busy_limit_gw;gw=..;gw_conc=..;gw_limit=..;g_conc=..;g_limit=..`（`app._conc_detail`） |
 | **并发作为选路因子（回退）** | ⚠️ **基础版已完成（2026-09-10）** | `app._order_by_concurrency`：候选池按「是否已打满」**稳定重排**（未满的排前），首选满则自动降级到同池有余量的网关，**全满才 503**；`_enrich_candidates` 附带 `conc_gw/conc_limit/at_capacity`。⚠️ 仍**依赖事件驱动的近似计数**，未接 P2-a 原子预留 → 并发瞬时误差下仍可能超发（P2-a 才是根治） |
 
-**当前真实生效的选路因子**：① `status==1` ② **心跳状态**（离线直接剔除候选池，`route/service.py:104`）③ 前缀最长→priority→id ④ 接入点↔落地 allow/deny 策略 ⑤ **并发未打满优先**（`_order_by_concurrency`，P2-c 2026-09-10）
+**当前真实生效的选路因子**：① `status==1` ② **心跳状态**（离线直接剔除候选池，`route/service.py:104`）③ 前缀最长→priority→id ④ 接入点↔落地 allow/deny 策略 ⑤ **并发未打满优先**（`_order_by_concurrency`，P2-c 2026-09-10）⑥ **网关主被叫规则**（候选池过滤，不通过即剔除该网关、回退同池下一候选，#74 2026-09-11）
 
 ## 8. 集群高可用 / M4 容量验证 / P3 / P4
 
@@ -148,7 +148,7 @@
 
 ## 9. ⚠️ 已知陷阱（判断进度前必读）
 
-1. **"建表未实现"陷阱**：`fs_node`、`operation_log`、`sys_user.role` 三处**表/字段已建但无业务逻辑**，只看表会误判为"已完成"。判断时必须查"有没有代码用它"。
+1. **"建表未实现"陷阱**：`sys_user.role` 仍是**字段已建但无业务逻辑**，只看表会误判为"已完成"。（`fs_node` / `operation_log` 已分别在 #69 与 #69/#73 接上业务逻辑，不再是空壳。）判断时必须查"有没有代码用它"。
 2. **计划文档滞后**：tdrive《任务拆解与测试计划 V1.0》是 2026-08-27 快照，M2/M3 全标未开始，实际已完成。**勿以该文档判断进度。**
 3. **两套 P 命名**：需求规划里的 P0/P1/P2 = 需求优先级（P2=计费二期）；本文档 §6 的 P2-a/b/c = 工程阶段。勿混。
 4. **DEV/PROD 分叉**：PROD 是**原生部署无 docker**，DEV 的 compose/entrypoint 改动不会自动影响生产。
@@ -256,7 +256,7 @@
 - 用户拍板：**忽略 wb-issues 看板的「待开始」7 项，今后待办事实来源只认本 ROADMAP**。已写入 `.workbuddy/memory/MEMORY.md`。
 
 
-## 2026-09-11 修复记录（dev 验证通过，**代码待提交**）
+## 2026-09-11 修复记录（一：录音 URI，#70，dev 验证通过，已推送）
 
 ### #70 录音 URI 抽象（落地 `local://`，预留 `cos://`）— 闭环 M3 T-306「录音下载/播放」
 
@@ -296,3 +296,78 @@
 - 前端 11/11（`fmtRecCell` 四态 + 列定义 + `playRecording` + `closeModal` 恢复）。
 
 **交付（2026-09-11）**：本项代码已提交并推送远端（`feat(#70): 录音 URI 抽象 local:// + 录音下载/播放闭环（T-306）`）；推送前已过 `git-push-secret-scan`（真实 IP / 密钥 0 命中）。
+
+---
+
+## 2026-09-11 修复记录（二：节点心跳超时判定 B1+B2，#73，dev 验证通过，代码待提交）
+
+### 背景：用户报「fs2 没起来，但 Web 显示 node2 在线」
+
+排查出**两个独立根因**，第 2 个是本次修复对象（#73）：
+
+1. （已修，运维层）node2 侧 `freeswitch2`/`gateway2`/`sipp-reg` 只定义在 untracked 的
+   `docker-compose.override.yml` 里，**当初没写 `restart`**（默认 `no`）→ docker daemon
+   重启后 node2 侧**永不自动恢复**。已补 `restart: unless-stopped`。
+   ⚠️ 排查陷阱：`docker compose ps` **默认只列 running**，看起来像"这些服务不存在"，
+   必须 `docker ps -a` 才看得到 Exited。
+2. （本次修复）**`fs_node.status` 是"最后写入值"**，写入方 = 该节点自己的网关进程。
+   node2 的 gateway2 一死，**就再没有写入方**去改它那一行 → `status` 永远停在 1，
+   形成**僵尸在线**（实测 `last_heartbeat_at` 精确停在容器被关停那一刻，`status` 仍是 1）。
+
+> 不只是显示问题：**Phase2 选路一旦按 `fs_node.status` 过滤节点，会把流量发给僵尸节点** —— 比不选路更糟。
+
+### 实现
+
+| 层 | 位置 | 内容 |
+|---|---|---|
+| 共用判定 | `src/node_health.py::evaluate()` | 纯函数：按 `last_heartbeat_at` 现算 `(stale, age_seconds, effective_status)`；`last_heartbeat_at` 为空回落 `created_at`（新行宽限）；naive 时间**按 UTC 解释**（MySQL DATETIME 无时区，按本地时区会平移 8h 全错） |
+| 阈值 | `src/node_health.py::stale_threshold()` | 自动 `max(3×node_health_interval, 90s)`；显式 `node_health_stale_threshold`（第2类热配）**下限 3×探测周期**，被钳制时打 warning（不静默忽略） |
+| **B1 展示层** | `src/api/app.py::list_nodes` (`GET /api/nodes`) | 每行附 `stale` / `stale_seconds` / `effective_status`（超时强制 offline），并回 `heartbeat_threshold`；**原 `status` 保留原值**便于排查 |
+| **B2 落库层** | `src/node_health.py::_sweep_stale_nodes()`，由 `NodeHealthProber._run` 每轮调用 | 任一**存活**节点的探测线程巡检 DB，把超时的**非本节点**行置 0 并走 `alert_if_changed` 告警（`reason=heartbeat_timeout`）。DB 共享 → 别人能替它改 |
+| 告警文案 | `src/alerting.py` | 补 `stale_seconds` / `threshold` / `reason`（可读化 `heartbeat_timeout`） |
+| 前端 | `src/static/admin.js` | 节点表按 `effective_status` 渲染 + 「心跳超时」标记 + 最后心跳列显示「已超时 Ns」；位点卡片同样标记（`?v=20260911b`） |
+
+**两条必须守住的设计不变量**（都是实测踩出来的，见 PITFALLS #63/#64）：
+
+- **阈值 ≥ 3×探测周期**：心跳是每个周期写一次，阈值 ≤ 周期时**健康节点会在下一次心跳到来前被对端判离线** → 互判、来回翻转、刷告警。
+- **周期变更必须 ≤5s 生效**（`_wait_interval` 分片等待 + 每片重读配置）：否则改小周期后节点仍按旧的长节奏写心跳，同样触发上面的误判。仅"分片"但 deadline 定死是**伪修复**。
+
+### 验证（dev，2026-09-11）
+
+- **单测 19/19 PASS**（容器内真实加载 `node_health`）：新鲜/超时/阈值边界(90/91)/回落 `created_at`/naive-UTC(10s 与 200s 两向)/overload 超时强制离线/status=0 不被误升/未来时间/ dict 入参/阈值钳制 5 例。
+- **端到端 18/18 PASS**（真实停掉 node2 侧容器复现原故障）：
+  - B1 独立证据：`t+03s raw=1 stale=False age=16` → `t+09s raw=1 stale=True eff=0 age=22`（**DB 里 status 仍是 1**，展示层已判离线）。
+  - B2：node2 行被 node1 的清扫置 0；`operation_log` 落 `node_offline` + `reason=heartbeat_timeout`（含 `stale_seconds`/`threshold`）；**本节点未被误扫**。
+  - 恢复：拉起 node2 后 8s 内回到在线 + `node_online` 告警。
+  - **周期变更及时性**：`60s→5s` 后心跳在 ≤5s 内恢复快节奏（旧实现要等满 60s）。
+  - **回归守卫**：全程 node1 无新增误判记录、终态两节点均在线。
+- **前端 12/12 PASS**（Node DOM 冒烟，真实加载 `admin.js` + `/api/nodes` fixture），且**反向对照**跑改动前的 `admin.js` 为 **8/12**（4 条针对本次改动的断言全 FAIL）—— 证明断言真的能抓回归。
+- 服务端契约：`/admin` 已出 `?v=20260911b`；`/static/admin.js` 含新逻辑；`/api/nodes` 未登录仍是 **401**（新路由没绕过全局鉴权中间件）。
+
+### 交付
+
+代码在 dev 工作树（6 文件改动：`node_health.py` / `api/app.py` / `alerting.py` / `db/migrate.py` / `static/admin.js` / `templates/index.html`），**待提交推送**（推送前须过 `git-push-secret-scan`）。
+
+## 2026-09-11 修复记录（三：网关主被叫规则参与降级，#74，dev 验证通过，代码待提交）
+
+### 根因（见 PITFALLS #65）
+- CDR `4f788f1a`：`caller=80000001 -> callee=ccc`，`switch_count=0` / `gateway_id=NULL` / `reject_reason=denied_by_gw_8_callee_rule:cc?1*`。
+- 根因：网关维度主被叫规则（`evaluate_call_scoped(OWNER_GATEWAY,...)`）此前**只在 `_phone_branch`/`_route_via_ap` 对 `candidates[0]` 跑一次**，不通过即 `build_deny_xml(603)` 整通挂断 —— 同池里本该胜出的次选**从未被考察**，failover 链没构建。
+- 对比：接入点↔落地策略（G4, `route/service._ap_gateway_allowed`）早就做了「候选池前移过滤 + 回退到同前缀下一个被允许网关」。两套语义不一致。
+
+### 修复（用户拍板 A 方案 + 话机 caller_mid 对齐）
+- 新增 `app._filter_candidates_by_gw_rules(db, candidates, caller, callee)`：剔除被本网关规则拒绝的候选，**保留者交给原有排序（前缀/优先级/并发）**，全被拒才拒呼（reason 带全部命中明细，≤64 字符兼容 `cdr.reject_reason`）。
+- `_phone_branch` 与 `_route_via_ap` 双路径均接入；**顺序不变式**：资格（规则）在前，偏好（并发重排）在后。
+- **话机分支 caller_mid 对齐 AP**：显式 `caller_mid = caller`（话机不经 AP 变换，无 ②c 层），空/拒/出局三处统一下发 `cdr_caller_mid`/`cdr_callee_mid`，使两分支 CDR 口径一致（D1：进入落地网关前的号）。
+- 注意：`reject_reason` 是 `varchar(64)` —— `_gw_deny_reason` 对多网关全拒场景截断并以 `;+N` 收尾，宁少明细不超宽。
+
+### 验证
+- 单测（容器内，真实 DB）ALL PASS：
+  - `callee=ccc` 候选池 `[gw8(testgw), gw7(testgateway)]` -> 过滤后 `kept=[7]`、`denied=[(8,'cc?1*')]`。
+  - `_gw_deny_reason`：单网关与历史逐字节一致；多网关 ≤64 字符。
+- E2E（真实打 `/fs/dialplan`，caller=80000001/callee=ccc）：返回 `<bridge data="sofia/gateway/testgateway/ccc"/>`，**不再整通 603**；XML 含 `cdr_caller_mid=80000001` / `cdr_callee_mid=ccc` / `cdr_gateway_id=7`。
+- 反向对照：历史版本对 ccc 返回 `denied_by_gw_8_callee_rule` 的 603（switch_count=0），本次断言 `denied_by` 缺位 + `bridge` 存在，区分力成立。
+- AP 分支回归：caller=1100/callee=cc8888 复放返回干净 XML（无 500/traceback）。
+
+### 交付
+代码在 dev 工作树（`src/api/app.py` 单文件改动 +130/−25，未与 #73 同提交），**待提交推送**（与 #73 一并过 `git-push-secret-scan`）。

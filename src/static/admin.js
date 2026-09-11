@@ -1368,7 +1368,9 @@ function renderNodeSeen() {
         txt = '已同步 seq ' + seen;
       }
     }
-    h += '<span class="prov-node"><b>' + (r.host || r.name || uuid) + '</b>' +
+    // B1：节点心跳超时时，位点信息已不可信（那个节点根本没在跑），单独标出来
+    const staleTag = r.stale ? '<span class="badge badge-off">心跳超时</span>' : '';
+    h += '<span class="prov-node"><b>' + (r.host || r.name || uuid) + '</b>' + staleTag +
       '<span class="badge ' + cls + '">' + txt + '</span></span>';
   });
   el.innerHTML = h;
@@ -1417,20 +1419,28 @@ function loadNodes() {
       el.innerHTML = '<div class="placeholder">暂无节点。节点由网关按 NODE_UUID 自动注册，稍候刷新。</div>';
       return;
     }
+    // B1：按 effective_status 渲染（后端已按 last_heartbeat_at 现算，心跳超时强制离线），
+    // 直接看 status 会把"网关已死但没人改状态"的节点显示成在线（僵尸在线）。
     const stMap = { 0: ['离线', 'badge-off'], 1: ['在线', 'badge-on'], 2: ['过载', 'badge-warn'] };
     let h = '<table><thead><tr><th>UUID</th><th>名称</th><th>地址</th><th>ESL端口</th>' +
       '<th>状态</th><th>并发</th><th>注册分机</th><th>连续失败</th><th>最后心跳</th></tr></thead><tbody>';
     rows.forEach(function (r) {
-      const sm = stMap[r.status] || ['未知', ''];
+      const eff = (r.effective_status != null) ? r.effective_status : r.status;
+      const sm = stMap[eff] || ['未知', ''];
+      const staleTag = r.stale ? '<span class="muted" style="font-size:12px"> 心跳超时</span>' : '';
+      const hb = r.last_heartbeat_at ? fmtBJ(r.last_heartbeat_at) : '—';
+      const hbCell = (r.stale && r.stale_seconds != null)
+        ? hb + ' <span class="muted" style="font-size:12px">(已超时 ' + r.stale_seconds + 's)</span>'
+        : hb;
       h += '<tr><td>' + (r.node_uuid || '') + '</td>' +
         '<td>' + (r.name || '') + '</td>' +
         '<td>' + (r.host || '') + '</td>' +
         '<td>' + (r.esl_port != null ? r.esl_port : '') + '</td>' +
-        '<td><span class="badge ' + sm[1] + '">' + sm[0] + '</span></td>' +
+        '<td><span class="badge ' + sm[1] + '">' + sm[0] + '</span>' + staleTag + '</td>' +
         '<td>' + (r.last_concurrency != null ? r.last_concurrency : '—') + '</td>' +
         '<td>' + (r.last_reg_count != null ? r.last_reg_count : '—') + '</td>' +
         '<td>' + (r.fail_count || 0) + '</td>' +
-        '<td>' + (r.last_heartbeat_at ? fmtBJ(r.last_heartbeat_at) : '—') + '</td></tr>';
+        '<td>' + hbCell + '</td></tr>';
     });
     h += '</tbody></table>';
     el.innerHTML = h;

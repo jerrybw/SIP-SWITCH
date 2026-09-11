@@ -10,6 +10,7 @@ P2：实时并发统计（esl_client._conc）+ 出局并发预检（超限回 50
 P3：管理端 REST CRUD（api/crud）+ Jinja 管理页（/admin）。
 """
 import os
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, RedirectResponse, JSONResponse, FileResponse
@@ -37,6 +38,7 @@ from esl_client import get_concurrency
 from api.directory_xml import fs_directory
 from fs_sofia_config import build_config_response
 from alerting import push_webhook
+from node_health import evaluate as nh_evaluate, stale_threshold as nh_stale_threshold
 import recordings
 
 app = FastAPI(title="SIP Switch Gateway API", version="0.2.0")
@@ -165,11 +167,33 @@ from api.accounts import router as accounts_router
 # ---------------------------------------------------------------------------
 @app.get("/api/nodes")
 def list_nodes(db: Session = Depends(get_db)):
-    """FS 节点健康检查快照（DEP-6 / #69）：各节点在线状态 + 并发 + 注册数 + 最后心跳。"""
+    """FS 节点健康检查快照（DEP-6 / #69）：各节点在线状态 + 并发 + 注册数 + 最后心跳。
+
+    B1（2026-09-11）：`fs_node.status` 只是"最后写入值"，写入方（该节点自己的网关）
+    一死就永久停在 1 → 僵尸在线。这里按 `last_heartbeat_at` **现算**超时：
+
+    - `stale` / `stale_seconds`：心跳是否已超时 / 超时多少秒
+    - `effective_status`：超时强制 offline，否则等于原 `status`
+    - `heartbeat_threshold`：本次判定阈值（秒），便于前端与排查对齐
+
+    前端一律按 `effective_status` 渲染；原 `status` 字段保留原值，便于排查
+    "DB 脏值 vs 展示口径" 的差异。B2 的落库清扫见 `node_health._sweep_stale_nodes`。
+    """
+    now = datetime.now(timezone.utc)
+    thr = nh_stale_threshold()
     rows = db.scalars(select(FsNode).order_by(FsNode.id)).all()
     cols = FsNode.__table__.columns
-    items = [{c.name: getattr(r, c.name) for c in cols} for r in rows]
-    return {"items": items}
+    items = []
+    for r in rows:
+        stale, age, eff = nh_evaluate(r, now=now, threshold=thr)
+        d = {c.name: getattr(r, c.name) for c in cols}
+        d["stale"] = stale
+        d["stale_seconds"] = age
+        d["effective_status"] = eff
+        d["heartbeat_threshold"] = thr
+        items.append(d)
+    return {"items": items, "heartbeat_threshold": thr,
+            "server_time": now.isoformat()}
 
 
 @app.post("/api/webhook-test")
@@ -387,12 +411,91 @@ def _conc_detail(gw, conc, ap_id=None, reason=""):
     return ";".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# ④b 落地网关维度主被叫限制 —— **候选池过滤**（2026-09-11，A 方案）
+#
+# 此前只对 `candidates[0]` 跑规则，不通过就 `build_deny_xml(603)` 整通挂断 ——
+# 「首选网关不收这个号」时，同池里本该胜出的次选**从未被考察**，failover 链
+# 根本没被构建（CDR 特征：switch_count=0 / gateway_id=NULL，见 PITFALLS #65）。
+#
+# 现改为与 ④ 里「接入点↔落地策略(G4, route/service._ap_gateway_allowed)」**同构**：
+# 先按规则剔除不可用网关，保留者再按 前缀/优先级/并发 排序 → **全被拒才拒呼**。
+# 语义变化：网关维度的 allow/deny 从「全局硬限制」变成「该网关的选路资格」。
+# 顺序不变式：**资格（规则）在前，偏好（并发重排）在后**，两者不可混。
+# ---------------------------------------------------------------------------
+
+_REJECT_REASON_MAX = 64   # = cdr.reject_reason varchar(64)，超长会被 MySQL 截断/报错
+
+
+def _gw_deny_one(gw, failed_dir, failed_rule):
+    """单个网关被规则拒绝时的历史格式 reason（保持逐字节兼容，勿改）。"""
+    lab = "caller" if failed_dir == DIR_CALLER else "callee"
+    pat = getattr(failed_rule, "pattern", None)
+    return f"denied_by_gw_{gw.id}_{lab}_rule:{pat}" if pat else f"denied_by_gw_{gw.id}_{lab}_rule"
+
+
+def _gw_deny_reason(denied):
+    """把「候选**全部**被网关规则拒绝」压成 **≤64 字符** 的机器可读 reason。
+
+    - 只拒 1 个网关：沿用 `denied_by_gw_<gid>_<dir>_rule:<pat>`（与旧行为逐字节一致，
+      候选池原本就只有 1 个网关时**零兼容风险**）；
+    - 拒多个：`denied_by_all_gw_rules:<gid>/<dir>/<pat>;...`，超出 64 字符时截断并以
+      `;+N` 收尾（宁少几条明细，也不能让 MySQL 截断 —— 列宽就是 64）。
+    """
+    if len(denied) == 1:
+        return _gw_deny_one(*denied[0])
+    head = "denied_by_all_gw_rules:"
+    shown = []
+    for i, (gw, failed_dir, failed_rule) in enumerate(denied):
+        item = "%d/%s/%s" % (gw.id, "caller" if failed_dir == DIR_CALLER else "callee",
+                             getattr(failed_rule, "pattern", None) or "-")
+        rest = len(denied) - i - 1
+        cand = head + ";".join(shown + [item]) + ((";+%d" % rest) if rest else "")
+        if len(cand) > _REJECT_REASON_MAX:
+            shown.append("+%d" % (len(denied) - i))
+            break
+        shown.append(item)
+    return head + ";".join(shown)
+
+
+def _filter_candidates_by_gw_rules(db, candidates, caller, callee):
+    """按落地网关维度主被叫限制过滤候选池，返回 (kept, denied)。
+
+    denied 元素为 `(gateway, failed_dir, failed_rule)`，供全被拒时生成可读 reason。
+    **只过滤、不排序** —— 顺序仍由 `select_outbound_gateway`（前缀/优先级）与
+    `_order_by_concurrency`（并发偏好）决定，保持「资格」与「偏好」分离。
+    口径：caller/callee 用**进入落地网关前**的号（D1，与 ④b 原语义一致）。
+    """
+    kept, denied = [], []
+    for g in candidates:
+        ok, failed_dir, failed_rule = evaluate_call_scoped(db, OWNER_GATEWAY, g.id, caller, callee)
+        if ok:
+            kept.append(g)
+        else:
+            denied.append((g, failed_dir, failed_rule))
+    if denied:
+        print("[gw-rule-filter] %s->%s skipped=%s kept=%s" % (
+            caller, callee,
+            ["%d:%s" % (g.id, _gw_deny_one(g, d, r).split("_rule")[-1]) for g, d, r in denied],
+            [g.id for g in kept]), flush=True)
+    return kept, denied
+
+
 def _phone_branch(db, caller, callee, context="default", phone=None):
     # v0.3 多租户：话机注册呼叫**不经过接入点**（AP 是中继/IP 接入维度），归属账户由话机自身
     # account_id 决定。此前此处 access_point_id 恒为 None 且不下发账户 → CDR 无 account_id，
     # _compute_billing 在 `if not ap_id` 处直接返回全空 → 话单不归属账户、不计费。
     # 现显式下发 cdr_account_id，_compute_billing 亦增加「无接入点时按话机解析账户」兜底。
     acct_id = getattr(phone, "account_id", None)
+    # D1 变量取值口径**对齐 AP 分支**（2026-09-11）：话机不经接入点（AP 是中继/IP 接入维度），
+    # 因此**没有 ②c 接入点变换**这一层，caller_mid 恒等于「进入落地网关前的主叫号」== caller。
+    # 显式声明并一路透传（empty / deny / outbound 三处都下发），使：
+    #   CDR.caller_in  = 入局号（未经任何变换）   → 与 _route_via_ap 的 orig_caller 同义
+    #   CDR.caller_mid = 进入落地网关前的号        → 与 _route_via_ap 的 caller_mid 同义
+    #   CDR.callee_mid = 进入落地网关前的被叫号    → 同上
+    # 网关维度规则亦统一按 caller_mid/callee 裁决（此前传的是裸 caller，值相同但语义未声明）。
+    orig_caller, orig_callee = caller, callee
+    caller_mid = caller
     # 内线互拨（Task14）：同租户话机 = 被叫前 4 位 == 主叫前 4 位 且总长 8 位纯数字。
     # 替代原 _LOCAL_EXT_RE(1000-1019)——8 位话机号（租户号+序号）不匹配旧正则，
     # 导致互拨也被当出局打去 trunk。
@@ -402,16 +505,16 @@ def _phone_branch(db, caller, callee, context="default", phone=None):
         return Response(content=build_allow_xml(callee, None, 60, caller_type="phone", context=context, account_id=acct_id), media_type="text/xml")
     c=select_outbound_gateway(db, callee, ap_id=None)
     if c is None:
-        return Response(content=build_empty_xml(caller_in=caller, callee_in=callee, context=context, account_id=acct_id), media_type="text/xml")
+        return Response(content=build_empty_xml(caller_in=orig_caller, callee_in=orig_callee, caller_mid=caller_mid, callee_mid=callee, context=context, account_id=acct_id), media_type="text/xml")
+    # ④b 落地网关维度限制 —— **候选池过滤**（A 方案，2026-09-11）：首选网关不收这个号时
+    # 自动降级到同池下一个候选（与 ④ 里 G4 接入点↔落地策略同构）；**全被拒才拒呼**。
+    c,denied=_filter_candidates_by_gw_rules(db, c, caller_mid, callee)
+    if not c:
+        rs=_gw_deny_reason(denied)
+        print("[rule-deny] phone",caller_mid,"->",callee,rs,flush=True)
+        return Response(content=build_deny_xml(rs, caller_in=orig_caller, callee_in=orig_callee, caller_mid=caller_mid, callee_mid=callee, account_id=acct_id), media_type="text/xml")
     gw=c[0]
-    ok,fd,fr=evaluate_call_scoped(db, OWNER_GATEWAY, gw.id, caller, callee)
-    if not ok:
-        lab="caller" if fd==DIR_CALLER else "callee"
-        pat=getattr(fr,"pattern",None)
-        rs=f"denied_by_gw_{gw.id}_{lab}_rule:{pat}" if pat else f"denied_by_gw_{gw.id}_{lab}_rule"
-        print("[rule-deny] GW",gw.id,"phone",caller,"->",callee,rs,flush=True)
-        return Response(content=build_deny_xml(rs, caller_in=caller, callee_in=callee, account_id=acct_id), media_type="text/xml")
-    co,ce=apply_translate(db, OWNER_GATEWAY, gw.id, caller, callee)
+    co,ce=apply_translate(db, OWNER_GATEWAY, gw.id, caller_mid, callee)
     gl=int(getattr(gw,"concurrent_limit",0) or 0)
     gg=int(settings.get("concurrent_limit_global",0) or 0)
     cc=get_concurrency()
@@ -424,12 +527,12 @@ def _phone_branch(db, caller, callee, context="default", phone=None):
             c=ro
             gw=c[0]
             gl=int(getattr(gw,"concurrent_limit",0) or 0)
-            co,ce=apply_translate(db, OWNER_GATEWAY, gw.id, caller, callee)
+            co,ce=apply_translate(db, OWNER_GATEWAY, gw.id, caller_mid, callee)
     if gl>0 and cc["gw"].get(gw.id,0)>=gl:
         return Response(content=build_deny_xml(_conc_detail(gw,cc,None,"busy_limit_gw"),sip_code="503"),media_type="text/xml")
-    legs = _enrich_candidates(db, c, caller, callee, conc=cc)
+    legs = _enrich_candidates(db, c, caller_mid, callee, conc=cc)
     print("[phone-outbound]",legs[0]["caller_out"],"->",legs[0]["callee_out"],"gw",gw.name,flush=True)
-    return Response(content=build_outbound_xml(legs[0]["callee_out"],candidates=legs,gateway_id=legs[0]["gateway_id"],carrier_id=legs[0]["carrier_id"],bill_unit=60,access_point_id=None,record_enabled=1,caller=legs[0]["caller_out"],caller_type="phone", caller_mid=caller, callee_mid=callee, context=context, dst_ip=legs[0]["ip"], dst_port=legs[0]["port"], account_id=acct_id),media_type="text/xml")
+    return Response(content=build_outbound_xml(legs[0]["callee_out"],candidates=legs,gateway_id=legs[0]["gateway_id"],carrier_id=legs[0]["carrier_id"],bill_unit=60,access_point_id=None,record_enabled=1,caller=legs[0]["caller_out"],caller_type="phone", caller_in=orig_caller, callee_in=orig_callee, caller_mid=caller_mid, callee_mid=callee, context=context, dst_ip=legs[0]["ip"], dst_port=legs[0]["port"], account_id=acct_id),media_type="text/xml")
 
 def _route_via_ap(db, ap, bill_unit, caller, callee, context="default"):
     """AP 确定后公共路由(方案A): ②c变换/③本地分机/④选落地/④b落地限制/④c变换/⑤并发预检/下发。default 与 trunk 共用。"""
@@ -450,17 +553,19 @@ def _route_via_ap(db, ap, bill_unit, caller, callee, context="default"):
     if candidates is None:
         return Response(content=build_empty_xml(access_point_id=ap_id, caller_in=orig_caller, callee_in=orig_callee, caller_mid=caller, callee_mid=callee, context=context), media_type="text/xml")
 
-    gw = candidates[0]
-
-    # ④b 落地网关维度限制（用进入网关前的 caller_mid/callee_mid，D1）
-    allowed, failed_dir, failed_rule = evaluate_call_scoped(
-        db, OWNER_GATEWAY, gw.id, caller_mid, callee)
-    if not allowed:
-        direction_label = "caller" if failed_dir == DIR_CALLER else "callee"
-        pattern = getattr(failed_rule, "pattern", None)
-        reason = f"denied_by_gw_{gw.id}_{direction_label}_rule:{pattern}" if pattern else f"denied_by_gw_{gw.id}_{direction_label}_rule"
-        print(f"[rule-deny] GW {gw.id} rejected {caller_mid}->{callee} by {reason}", flush=True)
+    # ④b 落地网关维度限制 —— **候选池过滤**（A 方案，2026-09-11）
+    #    与上面 ④ 的 G4「接入点↔落地策略」同构：先把被本网关规则拒绝的候选剔除，
+    #    让同前缀的下一个顶上；**全被拒才拒呼**（reason 带全部命中明细）。
+    #    此前只裁 candidates[0]、不通过即整通 603，导致「首选网关不收这个号」时
+    #    次选从未被考察（CDR 特征 switch_count=0 / gateway_id=NULL，见 PITFALLS #65）。
+    #    口径：用进入落地网关前的 caller_mid/callee（D1）。
+    candidates, denied = _filter_candidates_by_gw_rules(db, candidates, caller_mid, callee)
+    if not candidates:
+        reason = _gw_deny_reason(denied)
+        print(f"[rule-deny] {caller_mid}->{callee} {reason}", flush=True)
         return Response(content=build_deny_xml(reason, access_point_id=ap_id, caller_in=orig_caller, callee_in=orig_callee, caller_mid=caller, callee_mid=callee, context=context), media_type="text/xml")
+
+    gw = candidates[0]
 
     # ④c 逐腿落地网关维度变换（每个候选网关各自的出局号，T-205 故障切换需用本 gw 号）
     legs = _enrich_candidates(db, candidates, caller_mid, callee)

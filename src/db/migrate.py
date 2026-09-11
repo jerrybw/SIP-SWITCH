@@ -178,6 +178,8 @@ def ensure_system_setting_defaults(engine) -> None:
         ("node_health_interval", "30", "FS 节点健康检查周期(秒)"),
         ("node_health_fail_threshold", "3", "FS 节点连续失败判离线阈值(次)"),
         ("node_max_concurrency", "0", "FS 节点并发上限全局默认(0=不限制)"),
+        # B1/B2 心跳超时判离线（0 = 自动：max(3×探测周期, 90s)；显式值下限 3×探测周期）
+        ("node_health_stale_threshold", "0", "FS 节点心跳超时判离线阈值(秒；0=自动，下限3×周期)"),
     )
     with engine.connect() as conn:
         for k, v, d in defaults:

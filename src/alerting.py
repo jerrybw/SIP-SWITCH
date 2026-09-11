@@ -57,6 +57,13 @@ def _action_label(action):
     }.get(action, action)
 
 
+# 离线原因的可读化（B2 心跳超时清扫会带 reason=heartbeat_timeout）
+_REASON_LABEL = {
+    "heartbeat_timeout": "心跳超时（该节点网关进程已失联）",
+    "esl_probe_failed": "ESL 探测连续失败",
+}
+
+
 def build_alert_markdown(object_type, action, object_id, detail):
     """构造企业微信 markdown 消息体。"""
     label = _action_label(action)
@@ -74,7 +81,11 @@ def build_alert_markdown(object_type, action, object_id, detail):
     add("concurrency", "并发数")
     add("limit", "并发上限")
     add("reg_count", "注册分机数")
+    add("stale_seconds", "心跳超时")
+    add("threshold", "判定阈值")
     add("last_seen", "上次在线")
+    if d.get("reason"):
+        lines.append("> 原因: %s" % _REASON_LABEL.get(d["reason"], d["reason"]))
     return "\n".join(lines)
 
 
