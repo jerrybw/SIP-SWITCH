@@ -170,6 +170,7 @@ from api.billing import router as billing_router
 from api.accounts import router as accounts_router
 from api.cdr_export import router as cdr_export_router  # T-306 扩展点
 from api.oplog import oplog_middleware  # T-301 扩展点
+from api.csrf import csrf_middleware  # 安全扩展点：同源写校验（实现见 api/csrf.py）
 
 # ---------------------------------------------------------------------------
 # 节点状态 + Webhook 推送（#70 系列：节点健康可视化 + 外部告警落地）
@@ -330,6 +331,8 @@ def cdr_recording(uuid: str, download: int = 0, db: Session = Depends(get_db)):
 
 # T-301 操作日志自动埋点（实现见 api/oplog.py，本文件只挂载）
 app.middleware("http")(oplog_middleware)
+# CSRF 同源写校验（实现见 api/csrf.py，本文件只挂载）
+app.middleware("http")(csrf_middleware)
 
 app.include_router(auth_router)
 app.include_router(billing_router)
