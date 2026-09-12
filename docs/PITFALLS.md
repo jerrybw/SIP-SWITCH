@@ -460,3 +460,10 @@
 70. **变换规则 `replace_to` 的 `*` 引用的是 pattern 中 `*` 的捕获组；pattern 无 `*` 时 `\1` 非法 → re.sub 抛 re.error → /fs/dialplan 500（2026-09-12，已修 zcode 会话）**：管理端录入 `pattern=123, replace_to=99*` 即触发整通呼叫挂断，且无 ERROR 级日志只有 traceback。修法：无捕获组时 `*` 按字面量处理+warning（`rules/service._apply_one`）。判据：dialplan 500 + traceback 含 `invalid group reference`。
 
 71. **sipp 3.6 场景 XML 缺 `<?xml?>` 声明 + `<!DOCTYPE scenario SYSTEM "sipp.dtd">` 时同样报无行号 `Unable to load or parse`（2026-09-12，zcode 会话实测）**：与 #54/#55/#58 表象相同根因不同——即使 ASCII 注释、无 `--`、response 全整数，缺头部声明仍 parse 失败；归档 assets 都带头部，手写最易漏。用 `skills/sipp-uas-stub/assets/check-scenario.py` 可提前抓（建议该校验器补查 XML 声明缺失）。
+
+72. **目录下发 `a1-hash` 后，challenge-realm 必须与目录 domain 同源，否则话机注册恒 403（2026-09-13 实测，已修）**：
+    - **现象**：话机 REGISTER → FS 回 401 挑战（realm=对外 IP 172.22.10.186）→ 话机带正确 digest 重发 → **403 Forbidden**；网关侧 `/fs/directory` 却是 200 OK（目录正常返回）。用户视角「全都 403」，且 FS 日志无明显错误。
+    - **根因**：安全收敛（89d1bb5）后目录下发 `a1-hash=md5(user:domain:password)`，`domain` 由 `force-register-domain=$${domain}` 决定，而 `vars.xml` 里 `domain=$${local_ip_v4}` = **容器 IP**（172.18.0.2）；同时 internal profile 的 `challenge-realm=auto_from` = **话机 From 域**（对外 IP 172.22.10.186）。话机按对外 IP 算 digest，FS 用容器 IP 的 a1-hash 比对 → 恒失配。
+    - **修法**：`internal.xml` 的 `challenge-realm` 改 `$${domain}`（与 `force-register-domain` 同源）；**不要**改用 `$${external_sip_ip}`（那是 STUN 探测值，可能是公网 IP）。
+    - **排查方法**：① 模拟软电话完整 digest 注册脚本（401→带 Authorization 重发）复现，比抓用户话机快；② 对比 `global_getvar domain` 与 401 里的 `realm=`；③ 注意 **docker DNAT 规则带 `! -i br-*`**，从容器内访问宿主对外 IP:5060 不做 DNAT —— **容器内的测试结果不代表话机路径**，必须用宿主（或真实话机）测。
+    - **易误判**：症状像「IP 注入错乱」或「profile 挂了」，实际 profile 正常（会回 401）、IP 注入也正常，是**鉴权 realm 口径**问题。
