@@ -1,6 +1,6 @@
 # COLLAB_MEMORY — 协作记忆与资产密级约定
 
-> **版本**：v1.0（2026-09-12，作者 @WorkBuddy）
+> **版本**：v1.1（2026-09-12，作者 @WorkBuddy；v1.1 增补提交归因与 token 纪律）
 > **定位**：仓内协作记忆的唯一入口。配合 `docs/ROADMAP.md`（进度唯一事实源）与 `docs/PITFALLS.md`（避坑合集，append-only）使用。多 Agent 协作规范全文见仓外《多 Agent 协作开发方案》（如入仓将挂于此）。
 
 ## 1. 资产密级三级约定
@@ -23,7 +23,32 @@
 
 **说明**：`skills/` 目录源自 WorkBuddy 用户级 skill 的脱敏镜像。对 WorkBuddy Agent：直接用本地 skill（更快、含凭据引用）；对其他 Agent（opencode 等）：读本目录。
 
-## 3. 模块 Owner（v1.0 骨架，随并行开发补齐）
+## 3. 提交归因与 token 纪律（v1.1 增补）
+
+### 3.1 commit 归因规范（本地同环境，即时生效）
+
+本地同环境的 Agent（WorkBuddy / opencode 等，能直接操作 WSL 仓）统一在 commit 尾注声明身份：
+
+```
+Co-authored-by: <agent-name> <agent-name>@agent.local
+```
+
+- 示例：`Co-authored-by: workbuddy <workbuddy@agent.local>`、`Co-authored-by: opencode <opencode@agent.local>`
+- 分支仍按 trunk-based 规范：`feature/{agent-name}/{task-id}-{desc}`，生命周期 ≤3 天
+- 性质说明：尾注归因是**约定而非强制**（git 不校验署名）；单人 + 可信 Agent 场景够用，强制力随 §3.2 的触发条件一并引入
+
+### 3.2 token 纪律与升级触发条件
+
+**现状（维持）**：Agent **不持有**任何 token——push 由用户触发，PAT 当面提供、一次性 URL 使用、不落盘（`.git/config` 0 残留），push 前 `git-push-secret-scan` 卡点。这是当前最强且最简的权限模型。
+
+**升级触发条件（满足任一才升级）**：
+1. CI/PR 临时环境需要**自主 push**（无人值守流程）→ 引入 **fine-grained PAT**（仅 `Contents: write`，绑定单仓）+ **main 分支保护**（禁直推、只许 PR）
+2. 出现**非本地同环境**的常驻 Agent（云端/他人机器）→ 同上，外加评估 MCP 权限网关类方案
+3. 多人类协作启动 → branch protection + 强制 PR review
+
+**明确不采纳**（2026-09-12 评审，@WorkBuddy）：MCP 权限网关（GitBlinder/service-gator，当前 token 纪律已等效覆盖且更严）、Cursor Origin（Beta/规模不匹配）、自托管 GitLab/Gitea（运维负担）、平台迁移（成本纯损失）。完整论证见《多 Agent 协作开发方案》v1.1 §2。
+
+## 4. 模块 Owner（v1.0 骨架，随并行开发补齐）
 
 | 模块 | Owner | 说明 |
 |------|-------|------|
@@ -33,10 +58,10 @@
 | `concurrency.py` 并发预留 | （待派） | P2-a Redis Lua |
 | 前端 `static/` | （待派） | SECTIONS 驱动 |
 
-## 4. 新 Agent 入职清单
+## 5. 新 Agent 入职清单
 
 1. `docs/SIP-SWITCH-交接文档.md`
 2. `docs/ROADMAP.md`（待办唯一事实源；**以代码验证，禁凭记忆推演**）
 3. `docs/PITFALLS.md`（先查索引再按编号读；重点 #8 #24 #26 #30 #53 #60 #62-65）
-4. 本文档
+4. 本文档（**提交前读 §3 归因规范**）
 5. 按 `docs/SIP-SWITCH-WSL环境与上手.md` 起栈 → `./dev-up.sh` 验证
