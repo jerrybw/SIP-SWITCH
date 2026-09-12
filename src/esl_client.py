@@ -8,6 +8,10 @@
 - Event-Date-Timestamp 为 Unix 微秒，见 _parse_ts。
 - P2（T-206 前置）：在事件流上维护三档实时并发计数器 `_conc`
   （global / 接入点 / 落地网关），供出局并发预检与 `/api/stats/concurrency` 使用。
+- P2-a（D7，2026-09-12）：并发计数真源外移 Redis 原子预留（src/concurrency.py）。
+  dialplan 选路成功即 Lua 原子预留三档 + 写凭证；CHANNEL_CREATE 兜底（内线等无选路呼叫）；
+  HANGUP 按凭证幂等释放；对账线程扩展「泄漏凭证释放 + 全量校准」。
+  本文件的 `_conc` 降级为**影子计数**：backend=local 或 Redis 故障 fail-open 回落时使用。
 """
 import threading
 import json
@@ -21,6 +25,7 @@ from decimal import Decimal
 
 from fs_esl_socket import ESLConnection as ESLconnection
 
+import concurrency
 from core.config import settings, NODE_UUID
 from recordings import to_uri
 from db.session import SessionLocal
@@ -38,6 +43,10 @@ _store_lock = threading.Lock()
 # P2 实时并发计数器（T-206 前置）：三档原子计数。
 #   global = 全局并发；ap/gw = owner_id -> 并发数（接入点/落地网关维度）。
 # 计数口径：仅对主(A)腿计数，下游(B)腿合并不双计；cdr_* 通道变量到达即补计 ap/gw。
+# ⚠️ P2-a（D7）后为**影子计数**：真源在 Redis（concurrency.reserve_leg 原子预留）。
+#    影子用途：① backend=local 的主计数 ② Redis 故障 fail-open 回落时的预检快照。
+#    影子与 Redis 双轨独立：事件路径两轨各自增减（Redis 增在 dialplan 预留/ensure，
+#    影子增在 CHANNEL_CREATE，同秒级窗口），挂断路径两轨各自幂等释放。
 _conc: dict = {"global": 0, "ap": {}, "gw": {}}
 _conc_lock = threading.Lock()
 
@@ -168,8 +177,54 @@ def _reconcile_loop() -> None:
             print("[reconcile] error:", e)
 
 
+def _reconcile_redis_pass(live: set) -> None:
+    """P2-a：Redis 并发计数对账（凭证分片释放 + 全量校准自愈）。
+
+    ① 泄漏凭证释放：归属**本节点**（payload.n==NODE_UUID）且 FS 通道已不在 live
+       的凭证 → 幂等释放（release_leg 内部 DECR+DEL 原子）。他节点凭证由他节点
+       的 reconcile 负责（分片，避免双节点互相误删在途呼叫）。
+    ② 全量校准：expected 按**剩余全量凭证**统计（含他节点 → 双节点各算一致），
+       与实际计数不等则 SET 重置。多节点并发对账的短暂竞态误差下一轮自收敛。
+
+    live：本节点 FS `show channels` 的 uuid 集合（A/B 腿都在）。
+    """
+    if concurrency.backend() != "redis":
+        return
+    resv = concurrency.reservations()
+    if resv is None:
+        return
+    leaked = [u for u, p in resv.items()
+              if (p.get("n") or "") == NODE_UUID and u not in live]
+    released = []
+    for u in leaked:
+        if concurrency.release_leg(u):
+            released.append(u)
+    cur = concurrency.reservations()
+    if cur is None:
+        cur = {u: p for u, p in resv.items() if u not in set(released)}
+    exp = {"global": 0, "ap": {}, "gw": {}}
+    for p in cur.values():
+        exp["global"] += 1
+        g = p.get("g") or 0
+        a = p.get("a") or 0
+        if g:
+            exp["gw"][g] = exp["gw"].get(g, 0) + 1
+        if a:
+            exp["ap"][a] = exp["ap"].get(a, 0) + 1
+    if concurrency.calibrate(exp):
+        print("[reconcile] redis concurrency calibrated (global=%d gw=%s ap=%s)" % (
+            exp["global"], exp["gw"], exp["ap"]), flush=True)
+    if released:
+        print("[reconcile] released %d leaked reservation(s): %s" % (
+            len(released), [u[:8] for u in released]), flush=True)
+
+
 def _reconcile_pass() -> None:
-    """用 ESL `show channels` 快照对照 _call_store，修复「通道已消失但仍被计数」的腿。"""
+    """用 ESL `show channels` 快照对照 _call_store / Redis 凭证，自愈计数与 CDR 终态。
+
+    - 影子层（#75）：修复「通道已消失但仍被影子计数」的腿 + 回填 CDR。
+    - Redis 层（P2-a）：泄漏凭证释放 + 全量校准。两轮共用同一 live 快照。
+    """
     from fs_esl_cmd import esl_api
     raw = esl_api("show channels")
     if raw is None:
@@ -183,6 +238,11 @@ def _reconcile_pass() -> None:
             u = (row.get("uuid") or "").strip()
             if u:
                 live.add(u)
+    # P2-a：Redis 层对账（每轮都跑，泄漏无影子记录时也能修——如进程重启遗留凭证）
+    try:
+        _reconcile_redis_pass(live)
+    except Exception as e:  # noqa: BLE001
+        print("[reconcile] redis pass error:", e, flush=True)
     leaks = []
     with _store_lock:
         for u, rec in list(_call_store.items()):
@@ -313,10 +373,13 @@ def _upsert_call(call_uuid: str, **fields):
 
 
 def _maybe_count_leg(leg_uuid: str) -> None:
-    """对主(A)腿做一次并发计数（幂等，靠 _counted_* 标志防止重复）：
+    """影子计数（P2-a 后仅作 local 模式主计数 / fail-open 回落快照）：
+    对主(A)腿做一次并发计数（幂等，靠 _counted_* 标志防止重复）：
     - global 必定 +1；
     - 若该腿已带 cdr_access_point_id / cdr_gateway_id 则对应维度 +1
       （cdr_* 变量可能迟到，在后续携带该变量的事件里补计）。
+    Redis 真源不在本函数：预留写点在 dialplan（concurrency.reserve_leg），
+    兜底写点在 CHANNEL_CREATE（ensure_leg），见 handle_event。
     """
     rec = _call_store.get(leg_uuid)
     if rec is None:
@@ -339,7 +402,14 @@ def _maybe_count_leg(leg_uuid: str) -> None:
 
 
 def _dec_count_leg(rec: dict) -> None:
-    """主(A)腿挂断时按已计维度 -1（与 _maybe_count_leg 对称）。"""
+    """主(A)腿挂断时按已计维度 -1（与 _maybe_count_leg 对称）。
+
+    P2-a：同时释放 Redis 预留（concurrency.release_leg，凭证校验幂等——
+    凭证不存在/已释放/Redis 不可用均无副作用或仅记日志，靠对账自愈）。
+    """
+    # Redis 释放放锁外：网络 IO 不持 _conc_lock（失败靠 reconcile，不阻塞事件流）
+    if concurrency.backend() == "redis":
+        concurrency.release_leg(rec.get("uuid") or "")
     with _conc_lock:
         if rec.get("_dec_done"):
             return  # #75：幂等减计（挂断路径与对账线程可能都触发）
@@ -359,7 +429,15 @@ def _dec_count_leg(rec: dict) -> None:
 
 
 def get_concurrency() -> dict:
-    """供 app.py 并发预检与 /api/stats/concurrency 查询的快照。"""
+    """并发快照：backend=redis 优先取 Redis 真源（P2-a）；不可用回落影子计数。
+
+    展示接口 /api/stats/concurrency 与 local 模式预检共用。
+    dialplan 预检主路径用 concurrency.snapshot(gw_ids=...) 精确取键（app.py）。
+    """
+    if concurrency.backend() == "redis":
+        snap = concurrency.snapshot()
+        if snap is not None:
+            return snap
     with _conc_lock:
         return {"global": _conc["global"], "ap": dict(_conc["ap"]), "gw": dict(_conc["gw"])}
 
@@ -493,6 +571,15 @@ def handle_event(event) -> None:
         # P2 并发计数：仅对主(A)腿计数，下游(B)腿跳过（避免双计）。
         if not is_b_leg:
             _maybe_count_leg(leg_uuid)
+            # P2-a：cdr_gateway_id 已到达（实际落地 gw）→ 与预留凭证不一致则转移
+            # （T-205 failover 换腿场景：预留的是 candidates[0]，实际 bridge 成功的可能
+            #   是第 N 腿）。幂等：凭证已指向该 gw 则不动。
+            if (concurrency.backend() == "redis" and rec
+                    and rec.get("gateway_id")):
+                try:
+                    concurrency.transfer_leg(leg_uuid, rec["gateway_id"], NODE_UUID)
+                except Exception as _te:
+                    print("[conc] transfer error uuid=%s: %s" % (leg_uuid[:8], _te), flush=True)
 
     # 网关在拒绝时写入的通道变量，随事件透传，落 CDR.reject_reason。
     reject_reason = event.getHeader("variable_sip_gateway_reject_reason")
@@ -526,6 +613,14 @@ def handle_event(event) -> None:
             event.getHeader("variable_sip_req_uri")), flush=True)
         # P2：确保主(A)腿至少计入 global（ap/gw 待 cdr_* 变量到达后补计）。
         _maybe_count_leg(leg_uuid)
+        # P2-a：Redis 兜底预留 —— 出局呼叫 dialplan 已预留（凭证在 → 0 不重复）；
+        # 内线互拨等不经出局选路的呼叫在此补占 global 档。Redis 不可用静默跳过
+        # （影子计数兜底，Redis 恢复后 reconcile 校准）。
+        if concurrency.backend() == "redis":
+            try:
+                concurrency.ensure_leg(leg_uuid, NODE_UUID)
+            except Exception as _ee:
+                print("[conc] ensure error uuid=%s: %s" % (leg_uuid[:8], _ee), flush=True)
     elif etype in ("CHANNEL_PROGRESS", "CHANNEL_PROGRESS_MEDIA"):
         # 180 / 183 均记为振铃时间（PRD：收到 180/183 即记）
         _upsert_call(leg_uuid, ring_time=_parse_ts(event.getHeader("Event-Date-Timestamp")))

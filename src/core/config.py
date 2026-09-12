@@ -19,10 +19,11 @@ _CFG = os.environ.get("GATEWAY_CONFIG", os.path.join(_BASE, "config_settings.yam
 def _apply_defaults(cfg):
     """为可选配置段补齐默认值（缺失或留空时回落）。
 
-    node:       节点标识。多节点部署须唯一；留空回落主机名（单机/开发可用）。
-    record:     录音（第1类；具体 URI 抽象由 #70 实现）。
     redis:      留空回落 compose 服务名 redis:6379（即启用容器 Redis）；
                 切云 Redis 时显式填 host / port / password / db。
+    concurrency: P2-a 并发预留（第1/3类，启动生效）。
+                backend=redis|local；fail_open=true 时 Redis 不可用回落本地计数放行
+                （D5 逃生，默认 false=fail-close 拒新增，D3）；lease_ttl=预留凭证 TTL 秒。
     """
     # node
     n = cfg.get("node")
@@ -60,6 +61,21 @@ def _apply_defaults(cfg):
     if rd.get("db") in (None, ""):
         rd["db"] = 0
     cfg["redis"] = rd
+
+    # concurrency（P2-a 并发原子预留，第1/3类）
+    cc = cfg.get("concurrency")
+    if not isinstance(cc, dict):
+        cc = {}
+    cc.setdefault("backend", "redis")   # redis（默认，D7 原子预留）| local（旧事件驱动近似计数）
+    cc.setdefault("fail_open", False)   # D5 逃生开关：Redis 不可用时 true=回落本地计数放行
+    try:
+        cc.setdefault("lease_ttl", 86400)
+        cc["lease_ttl"] = max(60, int(cc.get("lease_ttl") or 86400))
+    except (TypeError, ValueError):
+        cc["lease_ttl"] = 86400
+    if cc.get("backend") not in ("redis", "local"):
+        cc["backend"] = "redis"
+    cfg["concurrency"] = cc
     return cfg
 
 

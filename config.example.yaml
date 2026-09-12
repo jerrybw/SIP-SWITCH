@@ -37,3 +37,25 @@ auth:
   admin_password_hash: <sha256-salt-password>  # sha256(password_salt + 明文密码).hexdigest()
   jwt_secret: <random-secret>                  # secrets.token_hex(24)，变更会使所有已登录会话失效
   token_expire_minutes: 120
+
+# ---- 以下为 Phase1/P2 新增段（缺省时代码内回落默认值，显式填写以覆盖）----
+
+node:
+  uuid: <node-uuid-or-empty>   # 多节点部署必填且全局唯一（留空回落主机名，仅单机用）
+
+record:
+  dir: /recordings             # FS 视角的录音写入根（dialplan record_session 落点）
+  local_root: /recordings      # 网关视角的读取根（local:// URI 解析；单机同 dir 即可）
+  backend: local               # local（默认）| cos（上云阶段）
+
+redis:
+  enabled: true                # false=禁用（仅连接自检，业务不依赖）
+  host: redis                  # compose 服务名；切云 Redis 填真实地址
+  port: 6379
+  password:                    # 无密码留空
+  db: 0
+
+concurrency:                   # P2-a 并发原子预留（第1/3类，启动生效）
+  backend: redis               # redis（默认，D7 原子预留真源）| local（旧事件驱动近似计数）
+  fail_open: false             # D5 逃生开关：true=Redis 不可用时回落本地计数放行（默认 fail-close 拒新增）
+  lease_ttl: 86400             # 预留凭证 TTL（秒）；正常由挂断/对账释放，TTL 仅防极端泄漏积累

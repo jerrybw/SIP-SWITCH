@@ -35,6 +35,7 @@ from esl_client import _resolve_caller_account, _check_balance_allowed
 from esl_client import pre_insert_cdr
 from route.service import select_outbound_gateway, resolve_access_point, resolve_access_points
 from esl_client import get_concurrency
+import concurrency  # P2-a：Redis 并发原子预留（D7）
 from api.directory_xml import fs_directory
 from fs_sofia_config import build_config_response
 from alerting import push_webhook
@@ -418,6 +419,74 @@ def _conc_detail(gw, conc, ap_id=None, reason=""):
 
 
 # ---------------------------------------------------------------------------
+# ⑤' P2-a 并发原子预留（D7，2026-09-12）
+#
+# 此前：读 get_concurrency() 快照 → 判断 → 下发。三步之间存在 TOCTOU 竞态窗口，
+# 高并发瞬时误差下会超发（ROADMAP §7 P2-a 缺口）。
+# 现在：快照仅用于 global/ap 预检与 P2-c 重排（偏好），**最终闸门是 Lua 原子预留**
+# —— check-and-increment + 写凭证一次原子完成，预留成功的候选即下发首选（FS 的
+# 多腿 failover 顺序与预留保持一致；后续腿转移由 esl_client capture 块 transfer_leg 处理）。
+# fail 语义：Redis 不可用 → D3 fail-close 拒新增（503 busy_limit_redis）；
+# concurrency.fail_open=true（D5 逃生，默认关）→ 回落影子计数放行。
+# ---------------------------------------------------------------------------
+
+def _conc_snapshot_or_fail(candidates, ap_id):
+    """并发快照（P2-a）。redis 后端取 Redis 真源（精确取候选相关键，最小 IO）；
+    Redis 不可用时按 D5 fail_open 决定：回落影子计数（返回非 None）或 fail-close（None）。"""
+    if concurrency.backend() == "redis":
+        snap = concurrency.snapshot(gw_ids=[g.id for g in candidates], ap_id=ap_id)
+        if snap is not None:
+            return snap
+        if concurrency.fail_open():
+            print("[conc] redis unavailable -> fail-open fallback to shadow counter (D5)", flush=True)
+        else:
+            return None
+    return get_concurrency()
+
+
+def _conc_reserve_candidates(candidates, uuid, ap_id, ap_limit, g_limit, context):
+    """对候选池逐个 Lua 原子预留。返回 (预留成功的 gw, deny Response)。
+
+    - 成功 → (gw, None)：调用方把该 gw 置为下发首选（其余候选顺延，作为 failover 腿）
+    - gw 维度满 → 试下一候选（与 P2-c「全满才拒」语义一致，但判定是原子的）
+    - global/ap 维度满 → 整通 503（实时值拼 _conc_detail，与旧格式对齐）
+    - Redis 不可用 → fail_open 放行（不预留）/ fail-close 503 busy_limit_redis
+    - local 后端或 uuid 缺失 → 不预留（保持旧行为），返回 (candidates[0], None)
+    """
+    if concurrency.backend() != "redis" or not uuid:
+        return candidates[0], None
+    last = None
+    for gw in candidates:
+        gl = int(getattr(gw, "concurrent_limit", 0) or 0)
+        res = concurrency.reserve_leg(uuid, gw.id, ap_id, g_limit, ap_limit, gl, NODE_UUID)
+        if res.get("ok") is True:
+            return gw, None
+        if res.get("ok") is None:
+            if concurrency.fail_open():
+                print(f"[conc] redis lost during reserve -> fail-open allow gw={gw.name} (D5)", flush=True)
+                return gw, None
+            print(f"[conc-limit] redis unavailable during reserve -> fail-close (gw={gw.name})", flush=True)
+            return None, Response(content=build_deny_xml(
+                "busy_limit_redis", sip_code="503", context=context), media_type="text/xml")
+        reason = res.get("reason") or "busy_limit_gw"
+        if reason != "busy_limit_gw":
+            # global/ap 维度满：与候选无关，无回退余地，直接拒（Lua 实时值拼明细）
+            print(f"[conc-limit] {reason} at reserve (gw={gw.name}) cur={res.get('cur')} limit={res.get('limit')}", flush=True)
+            return None, Response(content=build_deny_xml(
+                _conc_detail(gw, res.get("conc") or {}, ap_id, reason),
+                sip_code="503", context=context), media_type="text/xml")
+        last = (gw, res)
+    if last:
+        gw, res = last
+        print(f"[conc-limit] all {len(candidates)} candidate(s) at gw limit -> reject "
+              f"(last gw={gw.name} {res.get('cur')}/{res.get('limit')})", flush=True)
+        return None, Response(content=build_deny_xml(
+            _conc_detail(gw, res.get("conc") or {}, ap_id, "busy_limit_gw"),
+            sip_code="503", context=context), media_type="text/xml")
+    return candidates[0], None
+
+
+# ---------------------------------------------------------------------------
 # ④b 落地网关维度主被叫限制 —— **候选池过滤**（2026-09-11，A 方案）
 #
 # 此前只对 `candidates[0]` 跑规则，不通过就 `build_deny_xml(603)` 整通挂断 ——
@@ -487,7 +556,7 @@ def _filter_candidates_by_gw_rules(db, candidates, caller, callee):
     return kept, denied
 
 
-def _phone_branch(db, caller, callee, context="default", phone=None):
+def _phone_branch(db, caller, callee, context="default", phone=None, uuid=""):
     # v0.3 多租户：话机注册呼叫**不经过接入点**（AP 是中继/IP 接入维度），归属账户由话机自身
     # account_id 决定。此前此处 access_point_id 恒为 None 且不下发账户 → CDR 无 account_id，
     # _compute_billing 在 `if not ap_id` 处直接返回全空 → 话单不归属账户、不计费。
@@ -523,7 +592,11 @@ def _phone_branch(db, caller, callee, context="default", phone=None):
     co,ce=apply_translate(db, OWNER_GATEWAY, gw.id, caller_mid, callee)
     gl=int(getattr(gw,"concurrent_limit",0) or 0)
     gg=int(settings.get("concurrent_limit_global",0) or 0)
-    cc=get_concurrency()
+    # ⑤' P2-a：快照仅作 global 预检与 P2-c 重排偏好；最终闸门 = Lua 原子预留（D7）
+    cc=_conc_snapshot_or_fail(c, None)
+    if cc is None:
+        print("[conc-limit] redis unavailable, fail-close reject (fail_open=off)", flush=True)
+        return Response(content=build_deny_xml("busy_limit_redis",sip_code="503",caller_in=orig_caller,callee_in=orig_callee,caller_mid=caller_mid,callee_mid=callee,account_id=acct_id),media_type="text/xml")
     if gg>0 and cc["global"]>=gg:
         return Response(content=build_deny_xml(_conc_detail(gw,cc,None,"busy_limit_global"),sip_code="503"),media_type="text/xml")
     # P2-c：网关维度先按并发重排候选池（未打满的优先），全满才 503
@@ -534,13 +607,20 @@ def _phone_branch(db, caller, callee, context="default", phone=None):
             gw=c[0]
             gl=int(getattr(gw,"concurrent_limit",0) or 0)
             co,ce=apply_translate(db, OWNER_GATEWAY, gw.id, caller_mid, callee)
-    if gl>0 and cc["gw"].get(gw.id,0)>=gl:
-        return Response(content=build_deny_xml(_conc_detail(gw,cc,None,"busy_limit_gw"),sip_code="503"),media_type="text/xml")
+    # P2-a：逐候选原子预留（gw 维度在 Lua 内精确判定）；预留成功者置为下发首选
+    gw2, deny = _conc_reserve_candidates(c, uuid, None, 0, gg, context)
+    if deny is not None:
+        return deny
+    if gw2 is not None and gw2.id != gw.id:
+        c = [gw2] + [x for x in c if x.id != gw2.id]
+        gw = gw2
+        gl = int(getattr(gw, "concurrent_limit", 0) or 0)
+        co, ce = apply_translate(db, OWNER_GATEWAY, gw.id, caller_mid, callee)
     legs = _enrich_candidates(db, c, caller_mid, callee, conc=cc)
     print("[phone-outbound]",legs[0]["caller_out"],"->",legs[0]["callee_out"],"gw",gw.name,flush=True)
     return Response(content=build_outbound_xml(legs[0]["callee_out"],candidates=legs,gateway_id=legs[0]["gateway_id"],carrier_id=legs[0]["carrier_id"],bill_unit=60,access_point_id=None,record_enabled=1,caller=legs[0]["caller_out"],caller_type="phone", caller_in=orig_caller, callee_in=orig_callee, caller_mid=caller_mid, callee_mid=callee, context=context, dst_ip=legs[0]["ip"], dst_port=legs[0]["port"], account_id=acct_id),media_type="text/xml")
 
-def _route_via_ap(db, ap, bill_unit, caller, callee, context="default"):
+def _route_via_ap(db, ap, bill_unit, caller, callee, context="default", uuid=""):
     """AP 确定后公共路由(方案A): ②c变换/③本地分机/④选落地/④b落地限制/④c变换/⑤并发预检/下发。default 与 trunk 共用。"""
     ap_id = ap.id
     orig_caller, orig_callee = caller, callee
@@ -574,20 +654,25 @@ def _route_via_ap(db, ap, bill_unit, caller, callee, context="default"):
     gw = candidates[0]
 
     # ④c 逐腿落地网关维度变换（每个候选网关各自的出局号，T-205 故障切换需用本 gw 号）
-    legs = _enrich_candidates(db, candidates, caller_mid, callee)
+    # P2-a 后 legs 在 ⑤ 段预留完成、候选顺序定型后统一构建（含并发打标）。
 
-    # ⑤ 并发预检（P2, D3 超限回 503）
+    # ⑤ 并发预检 + 原子预留（P2-a D7）
+    # 快照仅用于 global/ap 预检与 P2-c 重排偏好；**最终闸门 = Lua check-and-reserve**
+    # （gw 维度精确判定在预留脚本内完成，杜绝快照→下发之间的 TOCTOU 超发）。
     # 维度上限：全局取自 settings.concurrent_limit_global；接入点/落地网关取自表 concurrent_limit。
     ap_limit = int(getattr(ap, "concurrent_limit", 0) or 0)
     g_limit = int(settings.get("concurrent_limit_global", 0) or 0)
-    conc = get_concurrency()
+    conc = _conc_snapshot_or_fail(candidates, ap_id)
+    if conc is None:
+        print("[conc-limit] redis unavailable, fail-close reject (fail_open=off)", flush=True)
+        return Response(content=build_deny_xml("busy_limit_redis", sip_code="503", access_point_id=ap_id, caller_in=orig_caller, callee_in=orig_callee, caller_mid=caller, callee_mid=callee, context=context), media_type="text/xml")
     if g_limit > 0 and conc["global"] >= g_limit:
         print(f"[conc-limit] global {conc['global']}>={g_limit} busy_limit_global", flush=True)
         return Response(content=build_deny_xml(_conc_detail(gw, conc, ap_id, "busy_limit_global"), sip_code="503", context=context), media_type="text/xml")
     if ap_limit > 0 and conc["ap"].get(ap_id, 0) >= ap_limit:
         print(f"[conc-limit] ap {ap_id} {conc['ap'].get(ap_id, 0)}>={ap_limit} busy_limit_ap", flush=True)
         return Response(content=build_deny_xml(_conc_detail(gw, conc, ap_id, "busy_limit_ap"), sip_code="503", context=context), media_type="text/xml")
-    # P2-c：网关维度**不再只判首选**。先按「是否已打满」稳定重排候选池，再拿新的首选做预检；
+    # P2-c：网关维度**不再只判首选**。先按「是否已打满」稳定重排候选池（快照偏好）；
     # 全部打满时才回 503（D8 全候选并发过滤）。这避免了「首选满、次选还有空」却直接拒呼。
     if any(int(getattr(c, "concurrent_limit", 0) or 0) > 0 for c in candidates):
         reordered = _order_by_concurrency(candidates, conc)
@@ -595,12 +680,16 @@ def _route_via_ap(db, ap, bill_unit, caller, callee, context="default"):
             print(f"[conc-limit] candidate reorder by concurrency: "
                   f"{[c.name for c in candidates]} -> {[c.name for c in reordered]}", flush=True)
             candidates = reordered
-            legs = _enrich_candidates(db, candidates, caller_mid, callee, conc=conc)
             gw = candidates[0]
-    gw_limit = int(getattr(gw, "concurrent_limit", 0) or 0)
-    if gw_limit > 0 and conc["gw"].get(gw.id, 0) >= gw_limit:
-        print(f"[conc-limit] gw {gw.id} {conc['gw'].get(gw.id, 0)}>={gw_limit} busy_limit_gw", flush=True)
-        return Response(content=build_deny_xml(_conc_detail(gw, conc, ap_id, "busy_limit_gw"), sip_code="503", context=context), media_type="text/xml")
+    # P2-a：逐候选原子预留；预留成功者置为下发首选（FS failover 顺序与预留一致，
+    # 后续腿实际落地 gw 的转移由 esl_client capture 块 transfer_leg 完成）
+    gw2, deny = _conc_reserve_candidates(candidates, uuid, ap_id, ap_limit, g_limit, context)
+    if deny is not None:
+        return deny
+    if gw2 is not None and gw2.id != gw.id:
+        candidates = [gw2] + [x for x in candidates if x.id != gw2.id]
+        gw = gw2
+    legs = _enrich_candidates(db, candidates, caller_mid, callee, conc=conc)
 
     rec_enabled = ap.record_enabled if ap is not None else 1
     print(f"[outbound] {legs[0]['caller_out']}->{legs[0]['callee_out']} routed to gateway {gw.name} "
@@ -617,7 +706,7 @@ def _route_via_ap(db, ap, bill_unit, caller, callee, context="default"):
     )
 
 
-def _trunk_branch(db, caller, callee, network_addr, context="trunk"):
+def _trunk_branch(db, caller, callee, network_addr, context="trunk", uuid=""):
     """方案A trunk 中继分支(context=trunk): 同一来源 IP 可能匹配多个 IP 型 AP,
     按 id 升序逐个试 ②a IP 校验 + ②b AP 限制, 首个通过者用于路由, 全不通则拒绝。"""
     aps = resolve_access_points(db, network_addr)
@@ -636,7 +725,7 @@ def _trunk_branch(db, caller, callee, network_addr, context="trunk"):
             continue
         print("[trunk] src=%s matched ap=%s(%s) %s->%s" % (
             network_addr, ap.id, ap.name, caller, callee), flush=True)
-        return _route_via_ap(db, ap, int(ap.bill_unit or 60), caller, callee, context)
+        return _route_via_ap(db, ap, int(ap.bill_unit or 60), caller, callee, context, uuid=uuid)
     print("[trunk] denied_by_all_ap src=%s tried=%s" % (network_addr, [a.id for a in aps]), flush=True)
     return Response(content=build_deny_xml("denied_by_all_ap", context=context), media_type="text/xml")
 
@@ -712,12 +801,12 @@ async def fs_dialplan(request: Request, db: Session = Depends(get_db)):
 
     # 方案 A：trunk 中继分支（context=trunk，IP 点对点接入点，多 AP 顺序匹配）
     if context == "trunk":
-        return _cache_failover_doc(uuid, _trunk_branch(db, caller, callee, network_addr, context))
+        return _cache_failover_doc(uuid, _trunk_branch(db, caller, callee, network_addr, context, uuid=uuid))
 
     # 方案 A：话机分支（caller 命中 sip_phone 且启用）-> 走话机分机/出局，跳过接入点限制/变换
     phone = db.scalar(select(SipPhone).where(SipPhone.phone_number == caller))
     if phone is not None:
-        return _cache_failover_doc(uuid, _phone_branch(db, caller, callee, context, phone=phone))
+        return _cache_failover_doc(uuid, _phone_branch(db, caller, callee, context, phone=phone, uuid=uuid))
 
     # 2) 解析接入点（注册用户名或 IP 白名单）
     ap, bill_unit = resolve_access_point(db, caller, network_addr)
@@ -744,7 +833,7 @@ async def fs_dialplan(request: Request, db: Session = Depends(get_db)):
         print(f"[rule-deny] AP {ap_id} rejected {caller}->{callee} by {reason}", flush=True)
         return Response(content=build_deny_xml(reason, access_point_id=ap_id, caller_in=caller, callee_in=callee), media_type="text/xml")
 
-    return _cache_failover_doc(uuid, _route_via_ap(db, ap, bill_unit, caller, callee, context))
+    return _cache_failover_doc(uuid, _route_via_ap(db, ap, bill_unit, caller, callee, context, uuid=uuid))
 
 
 @app.get("/healthz")

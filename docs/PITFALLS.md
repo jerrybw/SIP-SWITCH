@@ -436,3 +436,23 @@
     - **第二层原因（即便当成腿级失败也不切）**：`CALL_REJECTED` 既不在 gw8 的 `switch_codes`（`503,500,408,486`）也不在 `_ALWAYS_SWITCH_CAUSES` 里。
     - **规则 pattern 语义**（顺带澄清）：`translate_pattern` 把 `*`→`.*`、`?`→**一位任意字符**、其余字面转义，并**全串锚定** `^...$`。所以 `cc?1*` = `^cc.1.*$`（**不是**正则的 `?` 可选量词）；而 `prefix_route.prefix` 是**纯字符串 startswith**（无通配）。两者语义不同，别混。
     - **✅ 修复（#74，2026-09-11，用户拍板 A + 话机 caller_mid 对齐）**：新增 `app._filter_candidates_by_gw_rules(db, candidates, caller, callee)`，把网关规则**前移为候选池过滤**（与 G4 同构）—— 剔除被规则拒绝的网关、保留者交给原排序（前缀/优先级/并发）、**全被拒才拒呼**（reason 带全部命中明细，`_gw_deny_reason` 截断 ≤64 字符兼容 `cdr.reject_reason varchar(64)`）。`_phone_branch`/`_route_via_ap` 双路径接入；**顺序不变式：资格(规则)在前、偏好(并发)在后**。话机分支显式 `caller_mid=caller`（不经 AP 变换），使 CDR `caller_mid/callee_mid` 与 AP 分支口径一致（D1）。验证：单测(容器内真实 DB) `ccc→kept=[7],denied=[8]`；E2E 打 `/fs/dialplan` 返回 `bridge sofia/gateway/testgateway/ccc` 且 XML 含 `cdr_caller_mid=80000001`（不再整通 603）。
+
+66. **fs_cli 报 `Error Connecting` = 密码不对，不是网络问题（2026-09-12）**：
+    - fs_cli 默认密码 ClueCon，与环境 ESL 密码不符时 mod_event_socket 直接断连，fs_cli 报 **TCP 层假象** `Error Connecting []`，极易误判为 ESL 未监听。
+    - 正解：`fs_cli -p <ESL密码> -x '...'`；TCP 连通性单独用 `bash -c 'echo > /dev/tcp/127.0.0.1/8021'` 验证。
+
+67. **loopback originate 的 L16 codec 坑：INCOMPATIBLE_DESTINATION ≠ 产品回归（2026-09-12）**：
+    - `originate ...loopback/xxxx &park()` 做 E2E 时呼叫全挂 `INCOMPATIBLE_DESTINATION`（CDR `switch_count=0/billed=0`），FS 日志 `Hangup sofia/external/... [CS_CONSUME_MEDIA]`，桩侧 `Failed call=N`、FS 收到合法 200 OK 后**主动发 BYE**、全程无 ERROR 日志。
+    - 根因：**loopback 假 A 腿的 codec 是 L16/8000（内部直通编码）**，bridge 对外 INVITE 的 SDP codec 与桩 `RTP/AVP 0 8`（PCMU/PCMA）**零交集** → 200 后媒体协商失败。originate 变量加 `absolute_codec_string=PCMU` **无效**。
+    - 真实话机 A 腿协商出 PCMU/PCMA 不受影响——**这是测试工具局限，不是产品回归**（判据：历史 `billed=1` 的 CDR 是否仍在）。
+    - 排查：`sofia global siptrace on` 抓 INVITE 的 `m=`/`rtpmap` 行看 codec 集合；「收 200 却 BYE」=协商失败非桩问题。另：三合一桩（REGISTER/INVITE 混流）混流竞态会产生畸形双 tag 应答（`To:...;tag=X;tag=X`），注意分辨。
+
+68. **docker cp 替换文件 ≠ 进程重载；容器重启又回退镜像旧层（2026-09-12）**：
+    - 改 `src/` 后只 `docker cp` 进容器，**运行中进程仍跑旧模块**（Python 已加载进内存），E2E 与修复无关——表现为「修了没效果」（本次实测：竞态修复 docker cp 后 9 通复测仍是旧表现 global=9/gw7=0）。
+    - 直接 `compose restart/up -d` 又会**回退镜像旧层**（COPY 非挂载）。
+    - **正解**：改 src 必须 `docker compose build gateway` + `up -d`（强化 #10）；E2E 前用行为差异确认新代码真的在跑。
+
+69. **幂等/升级短路分支必须复检全部闸门：b 凭证升级绕过 limit（P2-a 实测缺口，2026-09-12 已修）**：
+    - ensure 兜底凭证（`"b":1`）在 dialplan reserve 升级时，`_LUA_RESERVE` 升级分支**无条件 INCR gw/ap**，绕过 `concurrent_limit`（gw7 limit=1，9 通并发全过、gw7=9）。
+    - 修法：升级分支 INCR 前查 gw/ap limit，满则 `BUSY`（凭证保留 b 形态，挂断按 b 语义只减 global，与 release 一致）。
+    - 通用教训：**幂等短路、升级、fast-path 分支必须在相同输入下与主路径等价**——尤其限额/权限类检查，漏一处就是旁路。

@@ -18,7 +18,7 @@
 | M2 路由与多落地（T-201~208） | 8 | 0 | 0 | **全部完成**（tdrive 计划文档仍标未开始，已滞后） |
 | M3 Web 管理端（T-301~307） | 5 | 2 | 0 | 缺口：角色校验 / 操作日志 / CDR 导出（录音下载/播放已闭环 #70） |
 | 二期计费（P2-1~4） | 2 | 1 | 1 | 代码超前于计划；防欺诈未做 |
-| 工程 P2-a/b/c | 0 | 1 | 2 | 受 Redis 未引入阻塞；**✅ Redis 形态已拍板=云托管（2026-09-11），P2-a 可启动**，见 §6 时序铁律 |
+| 工程 P2-a/b/c | 2 | 1 | 0 | **✅ P2-a 完成（2026-09-12，Redis 原子预留，见 §7 表）**；P2-b/c 基本完成（fail-open 默认值待拍板）；Redis 形态已拍板=云托管（2026-09-11） |
 | 集群高可用（T-501~504） | 1 | 1 | 3 | #69 FS 节点健康检查已落地（探测+落库+告警）；**心跳超时判定 B1+B2 已修（#73，僵尸在线闭环）**；多节点分发仍无 |
 | M4 容量验证（T-401~404） | 0 | 0 | 4 | **上生产硬门槛，未开始** |
 | P3 注册视图+多 FS | — | 1 | 1 | 注册目录已做，多 FS 未做 |
@@ -111,9 +111,9 @@
 
 | 编号 | 内容 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| P2-a | 状态外移 Redis + 原子预留（D7） | ❌ | **Redis 未引入**（`src/` 与 `requirements.txt` 均无） |
-| P2-b | fail-close / spool 补偿 / 逃生开关 | ⚠️ | ✅ 并发预检超限 503（`app.py:256-266`）、✅ spool + reaper（`_spool_cdr` / `start_cdr_reaper`）；fail-open 逃生待确认 |
-| P2-c | 并发作为**选路因子**（D8 v1.3） | ⚠️ **部分完成**（打标 ✅ / 选路 ✅ 基础版 / 原子预留 ❌ 依赖 P2-a） | 见下方"易混淆"说明 |
+| P2-a | 状态外移 Redis + 原子预留（D7） | ✅ **完成（2026-09-12）** | `src/concurrency.py`（Lua 预留/释放/转移/兜底 + ensure b 凭证升级补 gw/ap 档**且升级过 limit 闸门** + 凭证 TTL + reconcile Redis 对账层）；`app.py` `_conc_snapshot_or_fail`（fail-close 预检）+ `_conc_reserve_candidates`（逐候选 Lua 原子预留，gw 满自动试下一候选）；`esl_client.py` 挂钩 ensure(CHANNEL_CREATE)/transfer(cdr_gateway_id)/release(HANGUP)；`config.example.yaml` 补 concurrency 段；单测 `tests/test_concurrency_p2a.py` 20 条全绿。**E2E 实测**：9 通并发 gw7 计数 9/9（修复前竞态漏计=0，global=9/gw7=0）；limit=1 闸门 1 过 8 拒（修复后新增升级分支 limit 检查）；全程无 `conc:cnt:gw:0` 幽灵键、挂断归零；fail-close：停 Redis→503 busy_limit_redis，恢复→reconcile 自愈 |
+| P2-b | fail-close / spool 补偿 / 逃生开关 | ⚠️ 基本完成 | ✅ 并发预检超限 503、✅ spool + reaper、✅ fail-open 逃生开关已实现（`concurrency.fail_open()`，D5 默认关=fail-close；**默认值待拍板**）；E2E 实测停 Redis→503 busy_limit_redis、恢复→reconcile 自愈 |
+| P2-c | 并发作为**选路因子**（D8 v1.3） | ✅ **完成（2026-09-12，随 P2-a）** | 打标 ✅ / 选路重排 ✅ / 原子预留 ✅（Lua 最终闸门）；详见 §7 P2-a 行证据 |
 
 > ⚠️ **时序铁律（不得颠倒）：P2-a → P2-b → P2-c**
 > b/c 都依赖"准入时即时准确"的并发值，而现有计数是**事件驱动**（仅 A 腿、需等 `CHANNEL_CREATE`）。
