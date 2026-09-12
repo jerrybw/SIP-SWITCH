@@ -1,0 +1,42 @@
+# COLLAB_MEMORY — 协作记忆与资产密级约定
+
+> **版本**：v1.0（2026-09-12，作者 @WorkBuddy）
+> **定位**：仓内协作记忆的唯一入口。配合 `docs/ROADMAP.md`（进度唯一事实源）与 `docs/PITFALLS.md`（避坑合集，append-only）使用。多 Agent 协作规范全文见仓外《多 Agent 协作开发方案》（如入仓将挂于此）。
+
+## 1. 资产密级三级约定
+
+| 密级 | 内容 | 位置 | 规则 |
+|------|------|------|------|
+| **公开** | 机制/坑位/工作流/场景桩 | 仓内（本文档、PITFALLS、skills/、docs/） | 可自由 clone；PR 更新；PITFALLS 类文件 append-only |
+| **脱敏** | 配置模板、交接文档 | 仓内（占位符形式，如 `<DEV_HOST>`、`<ADMIN_PASSWORD>`） | 真实值只存在于部署时生成的 `.env` / `config_settings.yaml`（不入仓）；改动需保持占位符形式 |
+| **禁入** | 凭据、`docker-compose.override.yml`、`config/node2/`、`deploy/fs-config/node2/`、录音运行时数据、各 Agent 本地记忆 | 仓外 | 严禁入仓；push 前 secret-scan 兜底 |
+
+## 2. 仓内共享资产清单（2026-09-12 批次）
+
+| 资产 | 路径 | 说明 |
+|------|------|------|
+| 避坑合集 | `docs/PITFALLS.md` | 65+ 条，按 #编号引用；**append-only** |
+| 交接文档 | `docs/SIP-SWITCH-交接文档.md` | 项目全景速览（新 Agent 必读 #1） |
+| 环境上手 | `docs/SIP-SWITCH-WSL环境与上手.md` | DEV 环境搭建与起栈（必读 #2） |
+| sipp UAS 桩 skill | `skills/sipp-uas-stub/`（含 `assets/` 场景 XML+探测脚本） | 落地网关桩/注册桩/OPTIONS 探测；**场景文件已归档验证过，禁手写场景 XML**（中文注释/`--`/`response=".*"` 三大 parse 坑见 PITFALLS #54/#55） |
+| WSL 运维 skill | `skills/sip-wsl-devops/SKILL.md` | DEV 全栈运维：改源码重建、ESL/CDR 排障、多栈隔离 |
+
+**说明**：`skills/` 目录源自 WorkBuddy 用户级 skill 的脱敏镜像。对 WorkBuddy Agent：直接用本地 skill（更快、含凭据引用）；对其他 Agent（opencode 等）：读本目录。
+
+## 3. 模块 Owner（v1.0 骨架，随并行开发补齐）
+
+| 模块 | Owner | 说明 |
+|------|-------|------|
+| `api/app.py` 路由/选路 | （待派） | dialplan 预检/预留、P2-c 重排 |
+| `esl_client.py` ESL/CDR/计费 | （待派） | 事件异步化、reconcile |
+| `fs_sofia_config.py` / `fs_provision.py` FS 对接层 | （待派） | 机制 A 下发；**此层单一 Owner**，见协作方案 §6 |
+| `concurrency.py` 并发预留 | （待派） | P2-a Redis Lua |
+| 前端 `static/` | （待派） | SECTIONS 驱动 |
+
+## 4. 新 Agent 入职清单
+
+1. `docs/SIP-SWITCH-交接文档.md`
+2. `docs/ROADMAP.md`（待办唯一事实源；**以代码验证，禁凭记忆推演**）
+3. `docs/PITFALLS.md`（先查索引再按编号读；重点 #8 #24 #26 #30 #53 #60 #62-65）
+4. 本文档
+5. 按 `docs/SIP-SWITCH-WSL环境与上手.md` 起栈 → `./dev-up.sh` 验证

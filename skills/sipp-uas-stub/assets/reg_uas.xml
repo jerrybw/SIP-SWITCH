@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Single-instance Registrar + UAS stub (sipp 3.6.1 verified, peer = FreeSWITCH 1.11.2).
+     One sipp process keeps a register=true gateway in REGED state AND auto-answers calls.
+
+     Technique: NO branching, ONE unified response.
+       sipp scenarios have no conditional jump, and 3.6.1 enforces three hard rules:
+         1) <label> must use the id attribute (name="1" exits with
+            "label is missing the required 'id' parameter")
+         2) there is NO <next label="x"/> element ("Unknown element 'next'");
+            jumps are expressed as element attributes only:
+            <recv ... next="2"/>, <send next="1">, <nop next="1"/>
+         3) two consecutive optional recv are rejected
+            ("<recv> before <nop> sequence without a mandatory message")
+            => "wait for REGISTER, else wait for INVITE" cannot be expressed at all.
+       So the first recv matches every method via regex, then one shared 200 OK is sent.
+       REGISTER and INVITE 200 OK share the same header set (Via/From/To/Call-ID/CSeq/Contact);
+       only the SDP body differs -> use sipp's [len] to compute Content-Length dynamically.
+
+     WARNING: ACK/BYE/OPTIONS MUST be matched, otherwise they hit the mandatory recv
+              and the scenario fails -> the stub dies.
+     WARNING: never combine -aa with -sf (sipp exits immediately, 0 calls);
+              OPTIONS is already covered by the regex below.
+
+     NOTE: comments are ASCII-only on purpose; sipp 3.6 aborts with
+           "Unable to load or parse" when the declared encoding does not match the file bytes. -->
+<scenario name="reg-uas-unified">
+
+  <label id="1"/>
+
+  <recv request="(REGISTER|INVITE|ACK|BYE|OPTIONS|CANCEL|INFO|UPDATE|PRACK|SUBSCRIBE|NOTIFY)"
+        regexp_match="true" timeout="0"/>
+
+  <send next="1"><![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>;expires=3600
+Expires: 3600
+Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, REGISTER, INFO, UPDATE
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 1 1 IN IP4 [local_ip]
+s=sipp
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+  ]]></send>
+
+</scenario>

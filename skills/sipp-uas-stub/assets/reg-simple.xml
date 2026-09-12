@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Registrar only: answers REGISTER with 200 OK and loops waiting for re-registration.
+     Use this when you just need the gateway to turn REGED and do NOT need to receive calls.
+     If you also want the same instance to answer calls, use assets/reg_uas.xml instead.
+
+     FreeSWITCH sends REGISTER for a gateway with register=true; a plain 200 OK is enough
+     (no 401 challenge needed; FS only retries with credentials after a 401/407).
+
+     Loop is implemented via next="1" back to <label id="1"/>; -l raises the concurrency
+     limit because every new Call-ID opens a new sipp call.
+     Do NOT add -aa (incompatible with -sf; sipp would exit immediately).
+
+     NOTE: comments are ASCII-only on purpose; see assets/reg_uas.xml header. -->
+<scenario name="SIP registrar stub">
+  <label id="1"/>
+  <recv request="REGISTER" timeout="0"/>
+  <send next="1"><![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>;expires=3600
+Expires: 3600
+Content-Length: 0
+
+  ]]></send>
+</scenario>

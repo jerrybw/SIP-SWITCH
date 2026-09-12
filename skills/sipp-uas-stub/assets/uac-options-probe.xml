@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Minimal UAC that sends one OPTIONS; sipp ships no built-in OPTIONS UAC.
+
+     Usage:
+       sipp -sf uac-options-probe.xml -i <local-ip> -p 5070 -m 1 -nostdin <stub-ip>:5060
+
+     Verdict: on the sipp stats screen the "200" counter should be 1 and Timeout 0.
+     If it stays 0 with Timeout 1, the stub dropped OPTIONS.
+     Cross-check with assets/probe_options.py: a raw UDP probe that cannot be blamed
+     on the probe's own SIP stack.
+
+     NOTE: comments are ASCII-only on purpose; see assets/reg_uas.xml header. -->
+<scenario name="uac-options-probe">
+  <send><![CDATA[
+OPTIONS sip:stub@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+From: sipp <sip:sipp@[local_ip]>;tag=[call_number]
+To: stub <sip:stub@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 OPTIONS
+Contact: <sip:sipp@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+
+]]></send>
+  <recv response="200" timeout="6000" optional="true" />
+</scenario>
