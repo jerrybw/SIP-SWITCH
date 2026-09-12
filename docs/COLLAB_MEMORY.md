@@ -65,3 +65,18 @@ Co-authored-by: <agent-name> <agent-name>@agent.local
 3. `docs/PITFALLS.md`（先查索引再按编号读；重点 #8 #24 #26 #30 #53 #60 #62-65）
 4. 本文档（**提交前读 §3 归因规范**）
 5. 按 `docs/SIP-SWITCH-WSL环境与上手.md` 起栈 → `./dev-up.sh` 验证
+
+## 6. dev 共享环境使用约定（2026-09-12 环境重构后生效，全体 Agent 铁律）
+
+**公用栈（sip-switch project，`/root/src/SIP-SWITCH`，8 容器常备）**：
+- mysql + redis（单套共享）；freeswitch+gateway ×2（node1 Web 8000 / node2 Web 8001）
+- **sipp-reg 公用注册桩**：单实例三合一（REGISTER/INVITE/OPTIONS 全 200，`/root/sipp-reg/reg_uas.xml` 最新版，带头部声明），node1/node2 注册型网关共用（gw9 `test-register-gw` 应 REGED）
+- sipp-stub（OPTIONS+INVITE 桩）；种子备份 `/root/sip-switch-seed-backup-20260912.sql`（down -v 后 `docker exec -i mysql < 备份` 恢复）
+
+**使用铁律**：
+1. 公用栈供 **WorkBuddy 主会话 + 用户日常测试**使用，保持常驻
+2. **其他 Agent 按需自起独立栈**（`docker compose -p sip-switch-{name} ...` 或复制 dev-up.sh 改项目名），**用完立即 stop/down**，**禁止常驻**
+3. 对公用栈做破坏性操作（down -v、改卷、schema 迁移）前**必须先 mysqldump 备份并周知**
+4. `/fs/*` 已启用 HTTP Basic 认证（fail-closed）：凭据在 `.env` XMLCURL_* 与两个 config_settings.yaml `[xml_curl]` 段（node1/node2）**三处同值**，改配置勿删
+5. `/fs/*` 外部 curl 无凭据 → 401（正常，不是故障）；管理端裸 curl cookie 写 `/api/*` → 403（CSRF 同源校验，脚本请带 Authorization/Origin 头）
+
