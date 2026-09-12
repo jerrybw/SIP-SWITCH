@@ -112,7 +112,7 @@
 | 编号 | 内容 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
 | P2-a | 状态外移 Redis + 原子预留（D7） | ✅ **完成（2026-09-12）** | `src/concurrency.py`（Lua 预留/释放/转移/兜底 + ensure b 凭证升级补 gw/ap 档**且升级过 limit 闸门** + 凭证 TTL + reconcile Redis 对账层）；`app.py` `_conc_snapshot_or_fail`（fail-close 预检）+ `_conc_reserve_candidates`（逐候选 Lua 原子预留，gw 满自动试下一候选）；`esl_client.py` 挂钩 ensure(CHANNEL_CREATE)/transfer(cdr_gateway_id)/release(HANGUP)；`config.example.yaml` 补 concurrency 段；单测 `tests/test_concurrency_p2a.py` 20 条全绿。**E2E 实测**：9 通并发 gw7 计数 9/9（修复前竞态漏计=0，global=9/gw7=0）；limit=1 闸门 1 过 8 拒（修复后新增升级分支 limit 检查）；全程无 `conc:cnt:gw:0` 幽灵键、挂断归零；fail-close：停 Redis→503 busy_limit_redis，恢复→reconcile 自愈 |
-| P2-b | fail-close / spool 补偿 / 逃生开关 | ⚠️ 基本完成 | ✅ 并发预检超限 503、✅ spool + reaper、✅ fail-open 逃生开关已实现（`concurrency.fail_open()`，D5 默认关=fail-close；**默认值待拍板**）；E2E 实测停 Redis→503 busy_limit_redis、恢复→reconcile 自愈 |
+| P2-b | fail-close / spool 补偿 / 逃生开关 | ⚠️ 基本完成 | ✅ 并发预检超限 503、✅ spool + reaper、✅ fail-open 逃生开关已实现（`concurrency.fail_open()`，D5；**2026-09-13 拍板：默认维持 fail_open=false（fail-close）**——Redis 形态=云托管（高可用为前提），拒呼优于超发）；E2E 实测停 Redis→503 busy_limit_redis、恢复→reconcile 自愈 |
 | P2-c | 并发作为**选路因子**（D8 v1.3） | ✅ **完成（2026-09-12，随 P2-a）** | 打标 ✅ / 选路重排 ✅ / 原子预留 ✅（Lua 最终闸门）；详见 §7 P2-a 行证据 |
 
 > ⚠️ **时序铁律（不得颠倒）：P2-a → P2-b → P2-c**
