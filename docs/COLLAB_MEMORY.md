@@ -1,7 +1,7 @@
 # COLLAB_MEMORY — 协作记忆与资产密级约定
 
 > **版本**：v1.1（2026-09-12，作者 @WorkBuddy；v1.1 增补提交归因与 token 纪律）
-> **定位**：仓内协作记忆的唯一入口。配合 `docs/ROADMAP.md`（进度唯一事实源）与 `docs/PITFALLS.md`（避坑合集，append-only）使用。多 Agent 协作规范全文见仓外《多 Agent 协作开发方案》（如入仓将挂于此）。
+> **定位**：仓内协作记忆的唯一入口。配合 `docs/ROADMAP.md`（进度唯一事实源）与 `docs/PITFALLS.md`（避坑合集，append-only）使用。多 Agent 协作规范全文见 **`docs/多agent协作方案.md`**（v1.1，2026-09-13 入仓；此前置于仓外 `/root/src/` 时曾被误删，入仓后受 git 历史保护）。
 
 ## 1. 资产密级三级约定
 
