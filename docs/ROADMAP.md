@@ -47,11 +47,11 @@
 
 | 编号 | 任务 | 证据 |
 |---|---|---|
-| T-201 | 主被叫限制规则（`*`/`?`） | `build_allow_xml` / `build_deny_xml` / `build_empty_xml` |
-| T-202 | 前缀↔落地 + 最长匹配 | `src/route/service.py:118` 排序 `(-len(prefix), -priority, id)` |
+| T-201 | 主被叫限制规则（`*`/`?`） | `build_allow_xml` / `build_deny_xml` / `build_empty_xml`。2026-09-12（zcode）：补规则引擎单测 14 例；修复 `replace_to` 含 `*` 而 pattern 无捕获组时 re.sub 抛 re.error → dialplan 500 整通挂断（降级字面 `*`+告警，见 PITFALLS #70） |
+| T-202 | 前缀↔落地 + 最长匹配 | `src/route/service.py:118` 排序 `(-len(prefix), -priority, id)`。2026-09-12（zcode）：补出局选路集成测试 6 例（真 MySQL：排序/status 剔除/G4 过滤回退/全拒 None） |
 | T-203 | 允许/禁止落地 | `access_gateway_policy` + `_ap_gateway_allowed()` |
 | T-204 | 心跳检查（OPTIONS/剔除/恢复） | `src/heartbeat.py`：UDP OPTIONS 按 `(ip,port)` 分组；连续 `FAIL_THRESHOLD` 次失败才置离线，任一次成功立即恢复。**探测周期**取所有启用心跳网关的 `MIN(heartbeat_interval)`（每轮现读 DB，`heartbeat.py::_plan_interval`；2026-09-10 修死配置） |
-| T-205 | 故障切换分级 | `dialplan_xml.py` 恒定追 8 个 Q.850 cause；多候选逐腿 unrolled failover |
+| T-205 | 故障切换分级 | `dialplan_xml.py` 恒定追 8 个 Q.850 cause；多候选逐腿 unrolled failover。2026-09-12：failover 文档缓存与目录上下文缓存改 **LRU 有界淘汰**（`core/lru_cache.py`，zcode），超量不再全清在途呼叫上下文 |
 | T-206 | 并发上限三级 | `app.py:209-210 / 256-266` 全局 + AP + GW，超限 503 |
 | T-207 | CDR 三段主被叫 + 计费时长 | `cdr` 表 + `billsec` |
 | T-208 | CDR 重试 + 录音失败标记 | `main.py:26 start_cdr_reaper()` + `_spool_cdr()` + `record_status` |
@@ -62,7 +62,7 @@
 
 | 编号 | 任务 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| T-301 | 登录鉴权 + 角色 + 操作日志 | ⚠️ | ✅ `/login` `/logout` `/me`；**❌ `sys_user.role` 建字段但无校验（只读可绕过）**；**❌ `operation_log` 建表无写入** |
+| T-301 | 登录鉴权 + 角色 + 操作日志 | ⚠️ | ✅ `/login` `/logout` `/me`；**❌ `sys_user.role` 建字段但无校验（只读可绕过）**；**❌ `operation_log` 建表无写入**。2026-09-12 安全加固（zcode，Co-authored-by 归因）：① `/fs/*` xml_curl 回调 HTTP Basic 认证（fail-closed）+ `/fs/directory` 明文泄露收敛/a1-hash 下发（`api/fs_auth.py`，凭据 `deploy.sh` 两侧同源、存量增量补配，真实 REGISTER 摘要认证 E2E 闭环）；② 口令哈希升级版本化 PBKDF2 + 恒时序比对（`core/pw_hash.py`，登录兼容遗留 sha256 平滑升级，`tools/hash_password.py` CLI）；③ CSRF 纵深防御：cookie 面写操作同源校验（`api/csrf.py`，豁免 Authorization/`/fs/*`/login/logout；⚠️ 裸 curl cookie 脚本写 `/api/*` 将 403，Sec-Fetch-Site 放宽口径待拍板） |
 | T-302 | 接入管理页 | ✅ | `/{entity}` 通用 CRUD + `/access-points/{id}/gateway-policies` |
 | T-303 | 落地管理页 | ✅ | `gateway` / `carrier` CRUD |
 | T-304 | 路由配置页 | ✅ | `prefix_route` |

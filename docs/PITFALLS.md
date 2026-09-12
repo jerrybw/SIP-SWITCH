@@ -456,3 +456,7 @@
     - ensure 兜底凭证（`"b":1`）在 dialplan reserve 升级时，`_LUA_RESERVE` 升级分支**无条件 INCR gw/ap**，绕过 `concurrent_limit`（gw7 limit=1，9 通并发全过、gw7=9）。
     - 修法：升级分支 INCR 前查 gw/ap limit，满则 `BUSY`（凭证保留 b 形态，挂断按 b 语义只减 global，与 release 一致）。
     - 通用教训：**幂等短路、升级、fast-path 分支必须在相同输入下与主路径等价**——尤其限额/权限类检查，漏一处就是旁路。
+
+70. **变换规则 `replace_to` 的 `*` 引用的是 pattern 中 `*` 的捕获组；pattern 无 `*` 时 `\1` 非法 → re.sub 抛 re.error → /fs/dialplan 500（2026-09-12，已修 zcode 会话）**：管理端录入 `pattern=123, replace_to=99*` 即触发整通呼叫挂断，且无 ERROR 级日志只有 traceback。修法：无捕获组时 `*` 按字面量处理+warning（`rules/service._apply_one`）。判据：dialplan 500 + traceback 含 `invalid group reference`。
+
+71. **sipp 3.6 场景 XML 缺 `<?xml?>` 声明 + `<!DOCTYPE scenario SYSTEM "sipp.dtd">` 时同样报无行号 `Unable to load or parse`（2026-09-12，zcode 会话实测）**：与 #54/#55/#58 表象相同根因不同——即使 ASCII 注释、无 `--`、response 全整数，缺头部声明仍 parse 失败；归档 assets 都带头部，手写最易漏。用 `skills/sipp-uas-stub/assets/check-scenario.py` 可提前抓（建议该校验器补查 XML 声明缺失）。
