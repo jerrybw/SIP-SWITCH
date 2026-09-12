@@ -4,6 +4,7 @@
 P1 新增按 owner 维度裁决（接入点/落地网关）与号码变换（translate）。
 所有路由/限制决策都在网关层完成，由 mod_xml_curl 下发给 FS（架构铁律）。
 """
+import logging
 from typing import List, Optional, Tuple
 
 from sqlalchemy import select
@@ -13,6 +14,8 @@ from rules.matcher import (
     DIR_CALLER, DIR_CALLEE,
     evaluate_direction,
 )
+
+_log = logging.getLogger("rules.service")
 
 # owner 维度编码（与 Rule.owner_type 对齐；1=全局, 2=接入点, 3=落地网关）
 OWNER_GLOBAL = 1
@@ -85,11 +88,21 @@ def _apply_one(number: str, rule: Rule) -> str:
     """对单条 translate 规则做前缀替换：仅当号首命中 pattern 时替换（^ 锚定）。
 
     replace_to 中 ``*`` 引用捕获片段；空 replace_to = 删除匹配到的前缀。
+    防御（2026-09-12）：replace_to 含 ``*`` 但 pattern 不含 ``*``（无捕获组）时，
+    原 \1 引用会让 re.sub 抛 re.error → /fs/dialplan 500、该呼叫挂断。此处
+    把无法引用的 ``*`` 降级为字面量并打日志，宁可变换结果怪异也不让整通呼叫失败。
     """
     rx = _translate_pattern_to_regex(rule.pattern)
     if not rx.search(number):
         return number
-    repl = rule.replace_to.replace("*", r"\1") if rule.replace_to else ""
+    repl = rule.replace_to or ""
+    if "*" in rule.replace_to:
+        if "*" in (rule.pattern or ""):
+            repl = repl.replace("*", r"\1")
+        else:
+            # pattern 无捕获组：* 无从引用，降级为字面 *（防 re.error 崩溃）
+            _log.warning("[translate] rule %s: replace_to 含 * 但 pattern %r 无 *（无捕获组），"
+                          "按字面 * 处理", getattr(rule, "id", "?"), rule.pattern)
     return rx.sub(repl, number, count=1)
 
 
