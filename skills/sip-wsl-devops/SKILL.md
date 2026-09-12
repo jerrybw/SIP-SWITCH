@@ -11,7 +11,7 @@ agent_created: true
 | 项 | 值 |
 |---|---|
 | DEV 定义 | **本机 WSL**（Ubuntu 24.04），不是 docker 容器、不是 Windows |
-| 接入 | `ssh root@localhost -p 22022`，密码 `<WSL_ROOT_PASSWORD>` |
+| 接入 | `ssh -i <WSL_SSH_PRIVATE_KEY> root@localhost -p 22022`（**仅密钥登录**；devroot 已禁用密码登录，私钥不入库） |
 | 源码（source of truth） | `/root/src/SIP-SWITCH/`（git remote `github.com/jerrybw/SIP-SWITCH.git`） |
 | compose | `/root/src/SIP-SWITCH/docker-compose.yml` + `--env-file .env` |
 | 容器 | `sip-switch-mysql-1` / `sip-switch-freeswitch-1` / `sip-switch-gateway-1` |
@@ -29,7 +29,8 @@ WorkBuddy sandbox 会拦截 `wsl.exe`（`PROGRAM BLOCKED BY SECURITY POLICY`）�
 import paramiko
 c = paramiko.SSHClient()
 c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-c.connect('localhost', port=22022, username='root', password='<WSL_ROOT_PASSWORD>',
+c.connect('localhost', port=22022, username='root',
+          key_filename='<WSL_SSH_PRIVATE_KEY>',
           timeout=10, allow_agent=False, look_for_keys=False)
 stdin, stdout, stderr = c.exec_command(cmd, timeout=60)
 print(stdout.read().decode('utf-8', 'replace'))

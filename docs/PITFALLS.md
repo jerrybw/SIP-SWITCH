@@ -371,7 +371,7 @@
     - **⚠️ 三方视角不一致（最坑的点）**：Git Bash `ls` 能看到（9 条目），而原生 CMD 与 **WSL drvfs `ls /mnt/d/...` 都看不到**（8 条目）。→ 用单一视角判断"删没删掉"会得出相反结论。
     - **最终解法**：.NET `SetAttributes(path, Normal)` + `[IO.File]::Delete(\\?\ 扩展路径)` 组合后消失（调用**仍抛访问被拒异常，但实际已生效**）。之后三视角统一为 8 条目。
     - **通用铁律**：① Windows 侧**永远别写 `2>nul`**，统一 `2>/dev/null`；② **删除文件后的校验必须多视角**（Git Bash + WSL drvfs 双查一致才算数）；③ 遇到"删了但 `ls` 还在"或"看不到却存在"，先怀疑**保留设备名**（`NUL`/`CON`/`AUX`/`PRN`/`COM1~9`/`LPT1~9`）。
-    - **清理前的安全自查（本项目特有）**：工作区根目录的 `docker-compose.override.yml` 是 **node2（freeswitch2 + gateway2）的唯一定义**、`wsl_dev_key(.pub)` 是 **WSL SSH 私钥** —— 二者外形像脚手架，实为必需，**清理时必须保留**。
+    - **清理前的安全自查（本项目特有）**：工作区根目录的 `docker-compose.override.yml` 是 **node2（freeswitch2 + gateway2）的唯一定义**、**WSL SSH 私钥文件**（文件名只记录在交接方本地记忆文件，**文档内一律不写具体名**） —— 二者外形像脚手架，实为必需，**清理时必须保留**。
 
 58. **sipp 场景 XML 的注释里出现 `--` → 同样报 `Unable to load or parse`（2026-09-11 归档 skill 资产时踩）**：
     - **现象**：与 #54 **一字不差**的错误信息（`Unable to load or parse '<file>' xml scenario file`，不给行号），但文件是**纯 ASCII、无 BOM、声明 UTF-8** —— 按 #54 的判据全部"合格"，极易误判成"sipp 又抽风"。
@@ -462,8 +462,8 @@
 71. **sipp 3.6 场景 XML 缺 `<?xml?>` 声明 + `<!DOCTYPE scenario SYSTEM "sipp.dtd">` 时同样报无行号 `Unable to load or parse`（2026-09-12，zcode 会话实测）**：与 #54/#55/#58 表象相同根因不同——即使 ASCII 注释、无 `--`、response 全整数，缺头部声明仍 parse 失败；归档 assets 都带头部，手写最易漏。用 `skills/sipp-uas-stub/assets/check-scenario.py` 可提前抓（建议该校验器补查 XML 声明缺失）。
 
 72. **目录下发 `a1-hash` 后，challenge-realm 必须与目录 domain 同源，否则话机注册恒 403（2026-09-13 实测，已修）**：
-    - **现象**：话机 REGISTER → FS 回 401 挑战（realm=对外 IP 172.22.10.186）→ 话机带正确 digest 重发 → **403 Forbidden**；网关侧 `/fs/directory` 却是 200 OK（目录正常返回）。用户视角「全都 403」，且 FS 日志无明显错误。
-    - **根因**：安全收敛（89d1bb5）后目录下发 `a1-hash=md5(user:domain:password)`，`domain` 由 `force-register-domain=$${domain}` 决定，而 `vars.xml` 里 `domain=$${local_ip_v4}` = **容器 IP**（172.18.0.2）；同时 internal profile 的 `challenge-realm=auto_from` = **话机 From 域**（对外 IP 172.22.10.186）。话机按对外 IP 算 digest，FS 用容器 IP 的 a1-hash 比对 → 恒失配。
+    - **现象**：话机 REGISTER → FS 回 401 挑战（realm=对外 IP <WSL_HOST_IP>）→ 话机带正确 digest 重发 → **403 Forbidden**；网关侧 `/fs/directory` 却是 200 OK（目录正常返回）。用户视角「全都 403」，且 FS 日志无明显错误。
+    - **根因**：安全收敛（89d1bb5）后目录下发 `a1-hash=md5(user:domain:password)`，`domain` 由 `force-register-domain=$${domain}` 决定，而 `vars.xml` 里 `domain=$${local_ip_v4}` = **容器 IP**（172.18.0.2）；同时 internal profile 的 `challenge-realm=auto_from` = **话机 From 域**（对外 IP <WSL_HOST_IP>）。话机按对外 IP 算 digest，FS 用容器 IP 的 a1-hash 比对 → 恒失配。
     - **修法**：`internal.xml` 的 `challenge-realm` 改 `$${domain}`（与 `force-register-domain` 同源）；**不要**改用 `$${external_sip_ip}`（那是 STUN 探测值，可能是公网 IP）。
     - **排查方法**：① 模拟软电话完整 digest 注册脚本（401→带 Authorization 重发）复现，比抓用户话机快；② 对比 `global_getvar domain` 与 401 里的 `realm=`；③ 注意 **docker DNAT 规则带 `! -i br-*`**，从容器内访问宿主对外 IP:5060 不做 DNAT —— **容器内的测试结果不代表话机路径**，必须用宿主（或真实话机）测。
     - **易误判**：症状像「IP 注入错乱」或「profile 挂了」，实际 profile 正常（会回 401）、IP 注入也正常，是**鉴权 realm 口径**问题。

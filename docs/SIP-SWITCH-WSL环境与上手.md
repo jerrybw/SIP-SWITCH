@@ -11,7 +11,7 @@
 |---|---|
 | DEV | 本机 **WSL（Ubuntu 24.04）** |
 | 源码唯一真源 | WSL `/root/src/SIP-SWITCH/`（`github.com/jerrybw/SIP-SWITCH.git`，main） |
-| 接入 | `ssh -i <你的 wsl_dev_key> root@localhost -p 22022` |
+| 接入 | `ssh -i <WSL_SSH_PRIVATE_KEY> root@localhost -p 22022`（**仅密钥登录**，devroot 已禁用密码登录） |
 | 部署形态 | docker compose（项目名 `sip-switch`） |
 | 技术栈 | FreeSWITCH 1.11.2（源码编译镜像 `sip-switch-fs:1.11.2`）+ MySQL 8 + Redis + FastAPI |
 
@@ -23,7 +23,7 @@
 
 ## 2. 接入与凭据
 
-- **SSH 私钥** `wsl_dev_key` 在本机工作区（dev 接入用），交接时一并转交或重新生成。
+- **SSH 私钥**：devroot **仅允许密钥登录**（`PasswordAuthentication no`）。私钥由交接方**线下单独转交**，**不入库、不写进任何环境文档、不进 Issue/PR**；文件名/路径只记录在交接方的本地记忆文件中。换人接手时**重新生成密钥对**并替换 `authorized_keys`，不要复用旧私钥。
 - 所有运行密钥集中在 **`.env` + `config/docker/config_settings.yaml`**，**均已被 `.gitignore` 忽略，禁止入仓**，也不要在 Issue/PR 贴出。
 - 真实值由 `./deploy.sh --up` **一次性生成**（MySQL/ESL/Redis/JWT/admin 哈希等）。
 - **换凭据后必须 `docker compose restart gateway`**：`config_settings.yaml` 是 bind mount，改文件不触发重建，进程仍握旧密码 → 日志刷 `1045`。
