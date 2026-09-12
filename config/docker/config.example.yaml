@@ -34,8 +34,11 @@ prepaid_enabled: true          # true=预付费（余额不足 603 拒呼 + 挂�
 
 auth:
   admin_user: admin
-  password_salt: <random-salt>                 # secrets.token_hex(24)
-  admin_password_hash: <sha256-salt-password>  # sha256(password_salt + 明文密码).hexdigest()
+  # 口令哈希两种格式均受登录端支持：
+  #   新（推荐）：pbkdf2$<iter>$<salt_hex>$<dk_hex> —— python tools/hash_password.py 生成
+  #   遗留：64 位 hex = sha256(password_salt + 明文密码) —— 存量部署仍可登录，建议尽快换新
+  password_salt: <random-salt>                 # secrets.token_hex(24)（仅遗留哈希格式需要）
+  admin_password_hash: <admin-password-hash>   # 见上；deploy.sh 已默认生成新格式
   jwt_secret: <random-secret>                  # secrets.token_hex(24)
   token_expire_minutes: 120
 

@@ -2,7 +2,8 @@
 
 零第三方依赖（标准库 hmac / hashlib / base64 / json / time / secrets）。
 - token 形如 base64url(header).base64url(payload).HMAC-SHA256(signing_input, jwt_secret)
-- 密码不存明文：config 只存 password_salt + sha256(salt + password)
+- 密码不存明文：config 存版本化哈希（hash_password，pbkdf2$iter$salt$dk）；
+  校验端兼容历史 sha256(salt+password) 格式（存量部署免重置口令平滑升级）
 - 缺 jwt_secret 时 fail-fast（_cfg 抛 RuntimeError），避免「以为有鉴权其实没配」
 """
 import base64
@@ -13,6 +14,7 @@ import time
 import secrets
 from fastapi import APIRouter, Request, Response, HTTPException
 from core.config import settings
+from core.pw_hash import hash_password, verify_password as _verify_pw
 
 router = APIRouter(prefix="/api", tags=["auth"])
 _COOKIE = "sip_admin_sid"
@@ -35,7 +37,16 @@ def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode(s)
 
 
+def verify_password(password: str, stored: str) -> bool:
+    """校验管理员口令：新 pbkdf2$ 格式优先，兼容遗留 sha256(salt+password)。
+
+    遗留格式的 salt 取 config auth.password_salt（存量部署平滑升级路径）。
+    """
+    return _verify_pw(password, stored, legacy_salt=(_cfg().get("password_salt") or ""))
+
+
 def _pw_hash(password: str) -> str:
+    """遗留 sha256(salt+password) 公式。仅存量格式兼容与既有测试引用，新哈希走 hash_password。"""
     a = _cfg()
     salt = a.get("password_salt", "")
     return hashlib.sha256((salt + password).encode()).hexdigest()
@@ -84,7 +95,8 @@ async def login(request: Request, response: Response):
         raise HTTPException(status_code=400, detail="bad request")
     user = body.get("user", "")
     pw = body.get("password", "")
-    if user == a.get("admin_user") and _pw_hash(pw) == a.get("admin_password_hash"):
+    # 校验统一走 verify_password（新格式优先、兼容遗留格式），比对恒时序
+    if user == a.get("admin_user") and verify_password(pw, a.get("admin_password_hash", "")):
         tok = sign_token(user)
         response.set_cookie(
             _COOKIE, tok,

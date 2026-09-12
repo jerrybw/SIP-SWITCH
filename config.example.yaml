@@ -9,7 +9,9 @@
 #
 # 生成随机值示例：
 #   python -c "import secrets;print(secrets.token_hex(24))"   # jwt_secret / password_salt
-#   admin_password_hash = sha256(salt + 明文密码).hexdigest()
+#   admin_password_hash（新，推荐）：python tools/hash_password.py <明文口令>
+#     生成 pbkdf2$<iter>$<salt_hex>$<dk_hex>（版本化 PBKDF2，独立随机盐）
+#   admin_password_hash（遗留，仍受登录端兼容）：sha256(salt + 明文密码).hexdigest()
 #     （与 src/api/auth.py:_pw_hash 同源；salt 必须与上面 password_salt 一致）
 
 esl:
@@ -33,8 +35,8 @@ prepaid_enabled: false       # true=预付费（余额不足 603 拒呼 + 挂断
 
 auth:
   admin_user: admin
-  password_salt: <random-salt>                 # secrets.token_hex(24)
-  admin_password_hash: <sha256-salt-password>  # sha256(password_salt + 明文密码).hexdigest()
+  password_salt: <random-salt>                 # secrets.token_hex(24)（仅遗留哈希格式需要）
+  admin_password_hash: <admin-password-hash>   # 新：pbkdf2$...（tools/hash_password.py 生成）；遗留：sha256(salt+明文).hexdigest()
   jwt_secret: <random-secret>                  # secrets.token_hex(24)，变更会使所有已登录会话失效
   token_expire_minutes: 120
 

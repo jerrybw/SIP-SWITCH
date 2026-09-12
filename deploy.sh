@@ -104,7 +104,9 @@ XMLCURL_PW=$(gen_hex 16)
 JWT_SECRET=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
 SALT=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
 ADMIN_PW=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9' | head -c 12)
-ADMIN_HASH=$(python3 -c "import hashlib,sys; print(hashlib.sha256(('$SALT'+'$ADMIN_PW').encode()).hexdigest())")
+# 管理端口令哈希：版本化 PBKDF2（pbkdf2$iter$salt$dk，独立随机盐）。
+# 登录端兼容历史 sha256(salt+password) 存量格式；重置口令用 tools/hash_password.py。
+ADMIN_HASH=$(python3 -c "import hashlib,secrets; s=secrets.token_bytes(16); dk=hashlib.pbkdf2_hmac('sha256','$ADMIN_PW'.encode(),s,120000,32); print('pbkdf2\$120000\$%s\$%s'%(s.hex(),dk.hex()))")
 NODE_UUID=$(python3 -c 'import secrets;print(secrets.token_hex(8))')
 
 # ---------- 3) 渲染 .env（从 .env.example） ----------
@@ -140,7 +142,8 @@ t = t.replace('change-me', mp)               # mysql url 里的密码占位
 t = t.replace('<sip-domain>', ip)            # default_sip_domain
 t = t.replace('<random-salt>', salt)
 t = t.replace('<random-secret>', jwt)
-t = t.replace('<sha256-salt-password>', ah)
+t = t.replace('<sha256-salt-password>', ah)   # 遗留占位（存量模板兼容）
+t = t.replace('<admin-password-hash>', ah)    # 新占位（pbkdf2$…，见 tools/hash_password.py）
 t = t.replace('password: ""', 'password: %s' % rp)   # redis 密码（空=无认证，向后兼容）
 t = t.replace('__NODE_UUID__', node)                  # 节点唯一标识
 open(dst, 'w').write(t)
