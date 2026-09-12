@@ -83,7 +83,11 @@ def _doc(domain, users_xml):
     return Response(content=body, media_type="text/xml")
 
 
-_sip_call_ctx = {}
+# 目录请求上下文（按 sip_call_id）：LRU 有界淘汰（原「超 2000 全清」会连坐在途呼叫上下文）。
+# 读写方：app.py fs_directory_api（put）— 本模块只持有定义；容量 2000 与原阈值一致。
+from core.lru_cache import LRUCache
+
+_sip_call_ctx = LRUCache(2000)
 
 
 _default_domain_warned = False

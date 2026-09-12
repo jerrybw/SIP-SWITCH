@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 import re
 
 from core.config import settings, NODE_UUID, RECORD_ROOT, RECORD_BACKEND
+from core.lru_cache import LRUCache
 from db.session import get_db
 from db.models import Cdr, AccessPoint, Gateway, SipPhone, FsNode
 from rules.service import (
@@ -48,7 +49,8 @@ app = FastAPI(title="SIP Switch Gateway API", version="0.2.0")
 # T-205 逐腿故障切换：transfer 到 gw_leg_* 会触发**新的** xml_curl 请求，
 # 该重入请求丢失原始候选上下文（dest 变为 gw_leg_N）。按呼叫 uuid 缓存首呼生成的
 # 完整多腿文档，重入时原样返回，使 loop 延续（通道变量 gw_failover_* 随重取回传）。
-_FAILOVER_CACHE: dict = {}
+# LRU 有界淘汰（原「超 500 全清」会连坐在途呼叫的 failover 上下文）。
+_FAILOVER_CACHE = LRUCache(500)
 
 # P3：Jinja 管理页 + 静态资源
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -106,10 +108,8 @@ async def fs_directory_api(request: Request, db: Session = Depends(get_db)):
         cid = params.get("sip_call_id")
         if cid:
             from api.directory_xml import _sip_call_ctx
-            _sip_call_ctx[cid] = {"caller": params.get("sip_from_user"),
-                                  "callee": params.get("sip_request_user") or params.get("sip_to_user")}
-            if len(_sip_call_ctx) > 2000:
-                _sip_call_ctx.clear()
+            _sip_call_ctx.put(cid, {"caller": params.get("sip_from_user"),
+                                    "callee": params.get("sip_request_user") or params.get("sip_to_user")})
     except Exception:
         pass
     return fs_directory(params, db)
@@ -740,11 +740,12 @@ def _trunk_branch(db, caller, callee, network_addr, context="trunk", uuid=""):
     return Response(content=build_deny_xml("denied_by_all_ap", context=context), media_type="text/xml")
 
 def _cache_failover_doc(uuid: str, resp):
-    """T-205：首呼生成的多腿文档按 uuid 缓存，供 transfer 重入时原样返回。"""
+    """T-205：首呼生成的多腿文档按 uuid 缓存，供 transfer 重入时原样返回。
+
+    LRU（500）：容量满只淘汰最久未用条目，在途呼叫（刚写入）不受影响。
+    """
     if uuid and getattr(resp, "body", None) and b"gw_leg_0" in resp.body:
-        _FAILOVER_CACHE[uuid] = resp.body.decode("utf-8")
-        if len(_FAILOVER_CACHE) > 500:
-            _FAILOVER_CACHE.clear()
+        _FAILOVER_CACHE.put(uuid, resp.body.decode("utf-8"))
     return resp
 
 
@@ -774,7 +775,7 @@ async def fs_dialplan(request: Request, db: Session = Depends(get_db)):
 
     # 故障切换重入：dest 为 gw_leg_* 且命中缓存 → 原样返回首呼多腿文档，跳过规则重算
     if uuid and re.match(r"^gw_leg", callee) and uuid in _FAILOVER_CACHE:
-        return Response(content=_FAILOVER_CACHE[uuid], media_type="text/xml")
+        return Response(content=_FAILOVER_CACHE.get(uuid), media_type="text/xml")
 
     # 非 default 上下文（会议/语音信箱等）原样交回 FS，网关不接管。
     if context not in ("default", "trunk"):
