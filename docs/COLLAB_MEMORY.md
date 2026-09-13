@@ -80,3 +80,23 @@ Co-authored-by: <agent-name> <agent-name>@agent.local
 4. `/fs/*` 已启用 HTTP Basic 认证（fail-closed）：凭据在 `.env` XMLCURL_* 与两个 config_settings.yaml `[xml_curl]` 段（node1/node2）**三处同值**，改配置勿删
 5. `/fs/*` 外部 curl 无凭据 → 401（正常，不是故障）；管理端裸 curl cookie 写 `/api/*` → 403（CSRF 同源校验，脚本请带 Authorization/Origin 头）
 
+## 7. 三方协作现状与进度快照（2026-09-13 傍晚，接手必读）
+
+> 本节是**快照**，会过时；**待办事实源仍以 `docs/ROADMAP.md` 为准（以代码验证，禁凭记忆推演）**。
+
+| 方 | 沙箱账户 | 工作区 | 栈权限 | 当前状态 |
+|---|---|---|---|---|
+| **WorkBuddy** | 宿主直接 ssh root（**维护者**） | `/root/src/SIP-SWITCH`（真源） | 全权 | **P1 已交付**（`25902a7`→`16b6ca7`）；下一批 = P2 的 `app.py` patch |
+| **zcode** | `zcode@localhost:22022`（仅密钥；sudo 仅 `zcode-stack`） | `/home/zcode/work/SIP-SWITCH`（自己的 clone） | 独立栈 **zstack**（主仓代码）+ **zdev**（**它自己的 clone**），端口独立 | 正在写 **P2**（并发预检）+ 修前端 3 处；须 rebase 到 `16b6ca7`；**无 push 权限** |
+| **opencode** | `opencode@localhost:22022`（仅密钥；sudo 仅 `opencode-stack`） | `/home/opencode/work/multi-agent-comm/` | 独立栈 **ostack**（**仅 redis** `127.0.0.1:6390`） | 「多 Agent 通信方案」MVP 已交付验收；SSE 阻塞缺陷修复**已实测通过**；新派 4 件 |
+
+- **评审与设计稿**（不在仓内）：`/home/zcode/work/reviews/` —— `设计稿-P1-CDR真源.md`（含 **§14 实施发现与定稿偏离**）、
+  `设计稿-P2-并发预检实时查询.md`、`评审-P1-by-zcode.md`、`评审-P2-by-workbuddy.md`
+- **多 Agent 通信方案 v1.2**：本仓 `docs/多agent协作方案.md`（自 v1.1 升级）；opencode 侧开工依据 = 其项目内 `DESIGN.md`
+- **通知约定（2026-09-13 拍板）**：给其他 Agent 的通知**直接输出纯文本**（缩进 + 分段排版），**不生成 `.md` 文件**
+- **push 纪律**：zcode / opencode **均无 push 权限**；统一由 WorkBuddy **核验合入后**经**人工一次性 PAT** push（PAT 不落盘）
+- **当前待推**：18 commit（P1 的 5 个 + 此前 13 个）；策略 = 等 zcode 交付 → 核验合入 → **一起 push**
+- **环境新增**：zstack / zdev 的 freeswitch 段已加 `xml_cdr` 落盘卷（P1 随基线进入 Agent 栈；compose 有 `.bak` 备份）
+- **未拍板**：多 Agent「互相派发 / 可被调度的执行面」（A 常驻 runner + headless CLI / B 只接可脚本化任务 / C 文件桥）
+  —— **opencode 已被明确按住不做**，等用户决策
+
