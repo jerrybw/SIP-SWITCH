@@ -347,6 +347,43 @@ app.include_router(accounts_router)
 app.include_router(cdr_export_router)  # T-306：须在 crud 兜底路由前注册（PITFALLS #34）
 app.include_router(users_router)  # T-301 M3：用户管理（须在 crud 兜底前注册，PITFALLS #34）
 app.include_router(oplog_router)  # T-301 M3：操作日志查询（须在 crud 兜底前注册，PITFALLS #34）
+
+
+@app.get("/api/stats/concurrency")
+def stats_concurrency(db: Session = Depends(get_db)):
+    """P2：实时并发快照（global / 接入点 / 落地网关）+ 各维度上限。
+
+    - global_limit 取自 settings.concurrent_limit_global（缺省 0=不限制）。
+    - ap_limits / gw_limits 取自 access_point / gateway 表 concurrent_limit（默认 0=不限制）。
+    - source（P2 G2）：并发计数来源——redis=真源快照 / shadow=影子近似计数
+      （Redis 不可用时的本地事件驱动值，抖动期仅参考）。前端顶栏据此打徽标。
+      ⚠️ 本路由必须注册在 include_router(crud_router) 之前，否则被 crud 兜底
+      /api/{entity}/{item_id} 抢先匹配返回 422（PITFALLS #34，2026-09-13 实测）。
+    """
+    # P2 G2：来源标记——get_concurrency() 的 Redis→影子回落是无痕的，运维会把
+    # 影子近似值误当真源。这里显式判定来源。
+    source = "shadow"
+    conc = None
+    if concurrency.backend() == "redis":
+        snap = concurrency.snapshot()
+        if snap is not None:
+            source, conc = "redis", snap
+    if conc is None:
+        conc = get_concurrency()
+    ap_rows = db.scalars(select(AccessPoint)).all()
+    gw_rows = db.scalars(select(Gateway)).all()
+    ap_limits = {r.id: int(getattr(r, "concurrent_limit", 0) or 0) for r in ap_rows}
+    gw_limits = {r.id: int(getattr(r, "concurrent_limit", 0) or 0) for r in gw_rows}
+    return {
+        "global": conc["global"],
+        "global_limit": int(settings.get("concurrent_limit_global", 0) or 0),
+        "ap": conc["ap"],
+        "ap_limits": ap_limits,
+        "gw": conc["gw"],
+        "gw_limits": gw_limits,
+        "source": source,
+    }
+
 app.include_router(crud_router)
 
 
@@ -473,6 +510,9 @@ def _conc_reserve_candidates(candidates, uuid, ap_id, ap_limit, g_limit, context
     - local 后端或 uuid 缺失 → 不预留（保持旧行为），返回 (candidates[0], None)
     """
     if concurrency.backend() != "redis" or not uuid:
+        if concurrency.backend() == "redis" and not uuid:
+            # P2 G4：FS xml_curl 恒带 uuid，实际不可达；留 WARNING 便于异常请求排障
+            print(f"[conc] WARN reserve skipped: no uuid (context={context})", flush=True)
         return candidates[0], None
     last = None
     for gw in candidates:
@@ -859,28 +899,6 @@ async def fs_dialplan(request: Request, db: Session = Depends(get_db)):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
-
-
-@app.get("/api/stats/concurrency")
-def stats_concurrency(db: Session = Depends(get_db)):
-    """P2：实时并发快照（global / 接入点 / 落地网关）+ 各维度上限。
-
-    - global_limit 取自 settings.concurrent_limit_global（缺省 0=不限制）。
-    - ap_limits / gw_limits 取自 access_point / gateway 表 concurrent_limit（默认 0=不限制）。
-    """
-    conc = get_concurrency()
-    ap_rows = db.scalars(select(AccessPoint)).all()
-    gw_rows = db.scalars(select(Gateway)).all()
-    ap_limits = {r.id: int(getattr(r, "concurrent_limit", 0) or 0) for r in ap_rows}
-    gw_limits = {r.id: int(getattr(r, "concurrent_limit", 0) or 0) for r in gw_rows}
-    return {
-        "global": conc["global"],
-        "global_limit": int(settings.get("concurrent_limit_global", 0) or 0),
-        "ap": conc["ap"],
-        "ap_limits": ap_limits,
-        "gw": conc["gw"],
-        "gw_limits": gw_limits,
-    }
 
 
 @app.get("/cdr/{uuid}")
