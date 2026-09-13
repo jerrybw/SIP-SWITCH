@@ -95,8 +95,12 @@ async def login(request: Request, response: Response):
         raise HTTPException(status_code=400, detail="bad request")
     user = body.get("user", "")
     pw = body.get("password", "")
-    # 校验统一走 verify_password（新格式优先、兼容遗留格式），比对恒时序
-    if user == a.get("admin_user") and verify_password(pw, a.get("admin_password_hash", "")):
+    # M3 用户管理 Phase 1（64ef74a 拍板）：登录切 DB —— 查 sys_user（status=1），
+    # 密码校验复用 core/pw_hash（pbkdf2$ 新格式优先，遗留 sha256 兼容）。
+    # config 的 admin 降级为「首次启动种子」（db/session.py ensure_sys_user_seed），
+    # 仅当 sys_user **空表**时回落 config 直登（bootstrap 态：种子失败/全新库），
+    # 表里有行后永不回落（单一事实源 = DB）。
+    if _login_check_db(user, pw):
         tok = sign_token(user)
         response.set_cookie(
             _COOKIE, tok,
@@ -107,6 +111,40 @@ async def login(request: Request, response: Response):
     raise HTTPException(status_code=401, detail="invalid credentials")
 
 
+def _login_check_db(user: str, pw: str) -> bool:
+    """DB 优先的登录校验。惰性导入 db（保持本模块可被无 DB 环境单测导入）。
+
+    - 命中 sys_user 行（status=1）→ verify_password 校验（双格式兼容）
+    - sys_user 空表 → 回落 config admin 直登（bootstrap，打印醒目日志）
+    - DB 异常 → 记日志返回 False（宁拒登不裸奔；种子/查库恢复后自愈）
+    """
+    try:
+        from db.session import SessionLocal
+        from db.models import SysUser
+        from sqlalchemy import select
+        db = SessionLocal()
+        try:
+            row = db.scalar(select(SysUser).where(
+                SysUser.username == user, SysUser.status == 1))
+            if row is not None:
+                return _verify_pw(pw, row.password_hash or "",
+                                  legacy_salt=(_cfg().get("password_salt") or ""))
+            n = db.scalar(select(SysUser).count()) or 0
+            if n == 0:
+                print("[auth] sys_user 空表 -> bootstrap 回落 config admin（重启后将按 "
+                      "config 种子 super 用户；之后请走系统改密）", flush=True)
+                a = _cfg()
+                return (user == a.get("admin_user")
+                        and _verify_pw(pw, a.get("admin_password_hash", ""),
+                                       legacy_salt=(a.get("password_salt") or "")))
+            return False
+        finally:
+            db.close()
+    except Exception as e:
+        print("[auth] login DB check failed: %s" % e, flush=True)
+        return False
+
+
 @router.post("/logout")
 def logout(response: Response):
     response.set_cookie(_COOKIE, "", httponly=True, samesite="lax", max_age=0)
@@ -115,4 +153,18 @@ def logout(response: Response):
 
 @router.get("/me")
 def me(request: Request):
-    return {"user": get_current_admin(request)}
+    user = get_current_admin(request)
+    # M3：附带角色（前端按角色显隐用户管理/写按钮）。角色每请求现查 DB（token 不携带，
+    # 改角色即时生效，无需等 token 过期）；查不到/异常回落 admin（与 authz._role_of 同口径）。
+    role = "admin"
+    try:
+        from api.authz import _role_of
+        from db.session import SessionLocal
+        db = SessionLocal()
+        try:
+            role = _role_of(db, user)
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return {"user": user, "role": role}

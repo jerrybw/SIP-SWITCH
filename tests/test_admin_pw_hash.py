@@ -55,8 +55,9 @@ def test_hash_password_format_and_unique_salt():
 
 def test_verify_roundtrip_new_format():
     h = hash_password(_PW)
-    assert verify_password(_PW, h) is True
-    assert verify_password("wrong", h) is False
+    with patch.object(_auth_mod, "settings", _cfg_with(h)):
+        assert verify_password(_PW, h) is True
+        assert verify_password("wrong", h) is False
 
 
 def test_verify_rejects_malformed():
@@ -73,7 +74,24 @@ def test_verify_legacy_sha256_still_works():
         assert verify_password("wrong", _legacy_hash(_PW)) is False
 
 
-def test_login_new_format_200():
+@pytest.fixture
+def _login_stub(monkeypatch):
+    """把 _login_check_db 替换为「config 直登」桩。
+
+    M3 后真实登录是 DB 优先（无 DB 时宁拒登），端点级登录测试在没有 MySQL 的
+    纯函数环境里靠本桩覆盖「凭据对→200+cookie / 凭据错→401」的响应面；
+    _login_check_db 本身的 DB/空表/异常分支在 tests/test_users_m3.py 单测。
+    """
+    def _fake(user: str, pw: str) -> bool:
+        a = _auth_mod.settings.get("auth") or {}
+        from core.pw_hash import verify_password as _vp
+        return (user == a.get("admin_user")
+                and _vp(pw, a.get("admin_password_hash", ""),
+                        legacy_salt=(a.get("password_salt") or "")))
+    monkeypatch.setattr(_auth_mod, "_login_check_db", _fake)
+
+
+def test_login_new_format_200(_login_stub):
     cfg = _cfg_with(hash_password(_PW))
     with patch.object(_cc, "settings", cfg), patch.object(_auth_mod, "settings", cfg):
         c = TestClient(app)
@@ -81,7 +99,7 @@ def test_login_new_format_200():
         assert r.status_code == 200 and r.cookies.get("sip_admin_sid")
 
 
-def test_login_legacy_format_200():
+def test_login_legacy_format_200(_login_stub):
     cfg = _cfg_with(_legacy_hash(_PW))
     with patch.object(_cc, "settings", cfg), patch.object(_auth_mod, "settings", cfg):
         c = TestClient(app)

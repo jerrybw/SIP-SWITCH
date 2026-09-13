@@ -77,6 +77,13 @@ ensure_provision_sync_settings(_write_engine)
 ensure_gateway_node_table(_write_engine)
 from db.migrate import ensure_gateway_node_backfill
 ensure_gateway_node_backfill(_write_engine)
+# M3 T-301 用户管理 Phase 1（64ef74a 拍板）：config 管理员降级为首次种子 + role 注释对齐
+# ⚠️ migrate.py 尾部追加，已按协作约定报备（见 PR 描述）
+from db.migrate import ensure_sys_user_role_comment, ensure_sys_user_seed  # noqa: E402
+ensure_sys_user_role_comment(_write_engine)
+_a = settings.get("auth") or {}
+ensure_sys_user_seed(_write_engine, _a.get("admin_user") or "",
+                     _a.get("admin_password_hash") or "")
 
 # 主从就绪后启用：
 # _read_engine = create_engine(settings["mysql"]["read_url"], echo=False)

@@ -888,3 +888,70 @@ def ensure_provision_sync_settings(engine) -> None:
                     "VALUES (:k, :v, :d, NOW())")
             conn.execute(text(_ins), {"k": k, "v": v, "d": d})
         conn.commit()
+
+
+def ensure_sys_user_role_comment(engine) -> None:
+    """M3 T-301：sys_user.role 列注释从旧两档（'0 管理员 1 只读'）对齐三档口径。
+
+    三档口径以 api/authz.py ROLE_NAMES 为准（0=viewer 1=admin 2=super）。
+    旧注释是 sys_user 建表期（0 行、无业务代码）遗留，会误导手工种子/排障，
+    仅改注释不动数据（幂等：注释已新则跳过）。
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    want = "0 viewer 1 admin 2 super（口径见 api/authz.ROLE_NAMES）"
+    with engine.connect() as conn:
+        try:
+            cur = conn.execute(text(
+                "SELECT COLUMN_COMMENT FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = 'sys_user' "
+                "AND column_name = 'role'"
+            )).scalar()
+        except Exception as e:
+            print("[migrate] WARN sys_user.role comment check failed: %s" % e)
+            return
+        if cur is None or cur == want:
+            return
+        try:
+            conn.execute(text(
+                "ALTER TABLE sys_user MODIFY `role` tinyint NOT NULL DEFAULT 1 "
+                "COMMENT :c"
+            ), {"c": want})
+            conn.commit()
+            print("[migrate] sys_user.role 注释已对齐三档口径")
+        except Exception as e:
+            print("[migrate] WARN failed to update sys_user.role comment: %s" % e)
+
+
+def ensure_sys_user_seed(engine, admin_user: str, admin_password_hash: str) -> None:
+    """M3 用户管理 Phase 1（64ef74a 拍板）：config 管理员降级为「首次启动种子」。
+
+    sys_user 空表且 config [auth] 有 admin_user+admin_password_hash 时，写入一条
+    super（role=2）用户，密码哈希原样存 config 值（pbkdf2$… 与遗留 sha256 两种
+    格式登录端都兼容，见 core/pw_hash.verify_password）。此后改密走系统（用户
+    管理/重置密码），不再改配置文件。幂等：表缺失/已有行/config 值缺失均跳过。
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    if not admin_user or not admin_password_hash:
+        return
+    with engine.connect() as conn:
+        try:
+            exists = conn.execute(text(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = 'sys_user'"
+            )).scalar() is not None
+            if not exists:
+                return
+            n = conn.execute(text("SELECT COUNT(*) FROM sys_user")).scalar() or 0
+            if n:
+                return
+            conn.execute(text(
+                "INSERT INTO sys_user (username, password_hash, role, status, created_at) "
+                "VALUES (:u, :p, 2, 1, NOW())"
+            ), {"u": admin_user, "p": admin_password_hash})
+            conn.commit()
+            print("[migrate] sys_user 空表 -> 已按 config [auth] 种子 super 用户 '%s'"
+                  % admin_user)
+        except Exception as e:
+            print("[migrate] WARN sys_user seed failed: %s" % e)
