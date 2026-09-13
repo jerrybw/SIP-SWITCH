@@ -415,7 +415,7 @@ SSE 循环：`XREAD BLOCK 5000 STREAMS event:log {last_id}` → `data: {json}\n\
 ### 7.4 启动与端口
 
 - 监听 **`0.0.0.0:18080`**（端口已确认空闲）
-- 宿主机访问：`http://localhost:18080`（WSL2 端口转发）或 `http://172.22.10.186:18080`
+- 宿主机访问：`http://localhost:18080`（WSL2 端口转发）或 `http://<WSL_HOST_IP>:18080`
 - 后台常驻：`nohup python3 -m agent_comm.webapp > logs/webapp.log 2>&1 &`
   （**注意**：SSH 断开后进程需存活，用 `nohup`/`setsid`；不要占用前台会话）
 
