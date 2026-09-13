@@ -969,7 +969,18 @@ function fmtSwitchDetail(v) {
     var raw = (typeof v === 'string') ? v : JSON.stringify(v);
     return '<span class="muted">' + String(raw).replace(/</g, '&lt;') + '</span>';
   }
-  var parts = arr.map(function (e, idx) {
+  // P1（CDR 真源）：XML 兜底会在数组里追加 {"cdr_source":"xml_cdr"} 溯源标记（**非腿元素**），
+  // 这里按「有无 gateway_id」过滤，避免渲染成 gwundefined 的假腿；来源单独标注。
+  var src = '';
+  arr.forEach(function (e) { if (e && e.cdr_source) src = e.cdr_source; });
+  var legs = arr.filter(function (e) {
+    return e && e.gateway_id !== undefined && e.gateway_id !== null;
+  });
+  if (!legs.length) {
+    var rawOnly = (typeof v === 'string') ? v : JSON.stringify(v);
+    return '<span class="muted">' + String(rawOnly).replace(/</g, '&lt;') + '</span>';
+  }
+  var parts = legs.map(function (e, idx) {
     var gid = e.gateway_id;
     var gname = (GW_MAP && GW_MAP[gid]) ? GW_MAP[gid] : ('gw' + gid);
     var callee = e.callee_out || '';
@@ -982,7 +993,8 @@ function fmtSwitchDetail(v) {
     }
     return (idx + 1) + '. ' + gname + (callee ? ('(' + callee + ')') : '') + (cause ? (' → ' + cause) : '') + conc;
   });
-  return '<div style="white-space:nowrap">' + parts.join('<br>') + '</div>';
+  var tail = src ? ('<div class="muted">金额/终态来源: ' + src + '</div>') : '';
+  return '<div style="white-space:nowrap">' + parts.join('<br>') + '</div>' + tail;
 }
 function fmtCdrCell(k, v) {
   if (k === 'switch_detail') return fmtSwitchDetail(v);
