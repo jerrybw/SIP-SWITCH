@@ -625,3 +625,41 @@ if concurrency.backend() == "redis" and _rec_gw:
 **方法论沉淀**：`python3 -m pyflakes src/` 可静态抓出 `undefined name` 类缺陷（本次全仓仅 1 处）。
 **建议纳入提交前检查** —— 这类 bug 动态测试极难覆盖。详见 PITFALLS #73。
 
+## 2026-09-13 工程约定：提交前静态检查 + CDR 健康判据（源于 PITFALLS #73）
+
+**背景**：`handle_event` 引用了未定义变量 → `UnboundLocalError` → 异常被兜底 except 吞成
+**一行无堆栈日志** → 话单全 UNKNOWN 却长时间无人发现（详见「修复记录（三）」）。
+三条约定，成本都很低，但分别堵住本次暴露的三层漏洞。
+
+### 约定 1：提交前跑静态检查
+
+```bash
+bash tools/precheck.sh          # py_compile + pyflakes(undefined name)
+```
+
+「未定义变量」类缺陷**动态测试极难覆盖**（要走特定分支才触发），静态一抓就准。
+**贡献者在自己的 clone 里提交前同样适用**（`python3 -m pip install --user pyflakes` 即可）。
+
+### 约定 2：改 `esl_client` / 涉及通话链路 → 必跑 CDR 健康判据
+
+```bash
+docker cp tools/cdr_health.py <gateway>:/app/tools/
+docker exec <gateway> python /app/tools/cdr_health.py --minutes 60
+```
+
+判据：`hangup_cause = 'UNKNOWN' AND fs_node_uuid IS NULL` = **reconcile 回填指纹**
+（正常落库的 CDR 必带 `fs_node_uuid`，由 `_save_cdr` 写入 `NODE_UUID`）。
+**出现即说明 ESL 主路径没处理成功**。退出码 1 → 视为回归失败，E2E 收尾应作为断言之一。
+
+### 约定 3：新增「拼给列存」的串时自检长度
+
+`_conc_detail()` 这类拼接串曾因 **79 字符 > `varchar(64)`** 导致 CDR **整行**落库失败
+（`ON DUPLICATE KEY UPDATE` 一条列超长即整行失败，非仅该列）。
+`_upsert_cdr_dict` 现已加**通用列宽截断**兜底，但新增此类串仍应确认列宽足够。
+
+### 配套：ESL 事件异常不再静默
+
+`_event_worker_loop` 的异常出口改为 `_on_esl_event_error()`：**首次打完整堆栈** +
+落一条 `operation_log`（action=`esl_event_error`，管理端可见、同 action 去重），
+之后按累计计数打点。**「静默失败」是本次晚发现的根本原因**，此改动使其可被观测。
+

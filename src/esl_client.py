@@ -20,6 +20,7 @@ import glob
 import time
 from datetime import datetime
 import queue
+import traceback
 from math import ceil
 from decimal import Decimal
 
@@ -79,13 +80,45 @@ def _enqueue_event(ev) -> None:
             print("[ESL] event queue FULL, dropped=%d (worker too slow)" % _EVT_DROPPED, flush=True)
 
 
+_ESL_ERR_N = 0              # 事件处理累计异常数
+_ESL_ERR_STACK_SHOWN = False  # 是否已打过首次堆栈
+
+
+def _on_esl_event_error(e: Exception) -> None:
+    """事件处理异常的统一出口。
+
+    历史教训（PITFALLS #73）：此处原来只 print 一行**无堆栈**日志，导致
+    `handle_event` 的 UnboundLocalError 静默失败、话单全 UNKNOWN 却长时间无人发现。
+    现在：首次打完整堆栈 + 落一条 operation_log 告警（管理端可见，同 action 去重），
+    之后按累计计数打点，避免刷屏。
+    """
+    global _ESL_ERR_N, _ESL_ERR_STACK_SHOWN
+    _ESL_ERR_N += 1
+    if not _ESL_ERR_STACK_SHOWN:
+        _ESL_ERR_STACK_SHOWN = True
+        print("[ESL] handle error #%d (首次，含堆栈):\n%s"
+              % (_ESL_ERR_N, traceback.format_exc()), flush=True)
+        try:
+            from alerting import alert_if_changed
+            alert_if_changed(
+                "esl_event_error", "esl", "handler",
+                {"msg": "ESL 事件处理异常（首现）：%s —— 可能导致话单缺失/字段异常，"
+                        "请查 gateway 日志堆栈" % e,
+                 "level": "error"},
+                level="error")
+        except Exception:
+            pass
+    else:
+        print("[ESL] handle error #%d: %s" % (_ESL_ERR_N, e), flush=True)
+
+
 def _event_worker_loop() -> None:
     while True:
         ev = _EVT_Q.get()
         try:
             handle_event(ev)
         except Exception as e:  # noqa: BLE001
-            print("[ESL] handle error:", e)
+            _on_esl_event_error(e)
 
 
 def _enqueue_cdr_job(uuid, job, fallback=None) -> None:
