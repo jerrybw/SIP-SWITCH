@@ -45,18 +45,31 @@ sys.path.insert(0, "src")
 def _bigint_as_integer_sqlite(type_, compiler, **kw):
     return "INTEGER"
 
-# --- 桩 db.session：先占坑，阻断真实模块的 MySQL 连接/迁移副作用 -----------------
-if "db.session" not in sys.modules or not getattr(sys.modules["db.session"], "_STUB", False):
-    _stub = types.ModuleType("db.session")
-    _stub._STUB = True
+# --- db.session 处理：能用真实模块就不装桩（修全量会话隔离缺陷） -----------------
+# 缺陷复盘（2026-09-13，容器全量跑暴露）：真实 db.session 模块级连 MySQL 跑自迁移，
+# 无 DB 环境导入即炸——所以本地单跑才需要桩。但**全量会话下**（容器/CI 有真 MySQL），
+# 字母序在前的测试文件会先成功导入**真实** db.session，models 随之绑定**真实 Base**；
+# 旧写法无条件以桩顶替 sys.modules 再从桩取 Base，拿到的是**空 metadata** 的 Base
+# → create_all 建不出任何表 → `no such table: sys_user`（单文件跑正常、全量跑炸）。
+#
+# 修复口径（两条，缺一不可）：
+#   1. 桩只在「真实模块未加载且导入失败」时安装（容器/部署形态下真实模块可用，直接用）；
+#   2. 建表以 **models 实际注册的 metadata** 为准（SysUser.__table__.metadata），
+#      与哪个 Base 无关——两种加载时序（真实先载 / 桩先载）下都正确。
+if "db.session" not in sys.modules:
+    try:
+        import db.session  # noqa: F401,E402  容器/CI：真实模块（迁移幂等，副作用与其它测试等同）
+    except Exception:
+        _stub = types.ModuleType("db.session")
+        _stub._STUB = True
 
-    class _StubBase(DeclarativeBase):
-        pass
+        class _StubBase(DeclarativeBase):
+            pass
 
-    _stub.Base = _StubBase
-    _stub.SessionLocal = None       # 测试内按需替换
-    _stub.get_db = None            # 仅占位
-    sys.modules["db.session"] = _stub
+        _stub.Base = _StubBase
+        _stub.SessionLocal = None       # 测试内按需替换
+        _stub.get_db = None            # 仅占位
+        sys.modules["db.session"] = _stub
 
 if "db" not in sys.modules:
     import db  # noqa: F401,E402
@@ -72,7 +85,8 @@ from api.users import (create_user, update_user, delete_user,  # noqa: E402
                        SelfPassword, _enabled_super_count)
 from api.authz import require_role, write_guard_middleware, _role_of, ENFORCE_ROLE  # noqa: E402
 
-_Base = sys.modules["db.session"].Base  # models 顶层绑定的就是它
+# 建表基准：models 实际挂的 metadata（真实 Base 或桩 Base 均自适应，见顶部复盘）
+_Meta = SysUser.__table__.metadata
 
 _SALT = "testsalt00000000000000000000"
 _SECRET = "testjwtsecret0000000000000000"
@@ -101,7 +115,7 @@ def db_engine():
     engine = create_engine("sqlite://",
                            connect_args={"check_same_thread": False},
                            poolclass=StaticPool)
-    _Base.metadata.create_all(engine)
+    _Meta.create_all(engine)
     return engine
 
 
