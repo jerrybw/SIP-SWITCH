@@ -155,6 +155,10 @@ SECTIONS['accounts'] = {
   ],
 };
 SECTIONS['nodes'] = { label: '节点状态', custom: 'nodes' };
+// ---- M3 T-301 用户管理（superOnly：viewer/admin 不入侧栏；后端 require_role 兜底）----
+SECTIONS['users'] = { label: '用户管理', custom: 'users', superOnly: true };
+// ---- M3 T-301 操作日志（审计面，superOnly 同上；后端 GET 登录即可查）----
+SECTIONS['oplogs'] = { label: '操作日志', custom: 'oplogs', superOnly: true };
 function renderAccounts(key, st) {
   st = st || { page: 1, page_size: 50 };
   var c = document.getElementById('content');
@@ -383,9 +387,15 @@ function textOf(field, value) {
 function renderSidebar() {
   const nav = document.getElementById('sidebar');
   nav.innerHTML = '';
+  // M3 T-301：未登录（bootAuth 前）角色未知 -> 按 admin 渲染全量（登录成功后
+  // renderUser 会带角色重绘一次；write_guard 后端兜底，前端显隐只是 UI 优化）。
+  const role = window._adminRole || 'admin';
   Object.keys(SECTIONS).forEach(function (key) {
+    const s = SECTIONS[key];
+    // superOnly 区：viewer/admin 不显示（操作日志对 super 只读可见）
+    if (s.superOnly && role !== 'super') return;
     const a = document.createElement('a');
-    a.textContent = SECTIONS[key].label;
+    a.textContent = s.label;
     a.onclick = function () { showSection(key); };
     a.dataset.key = key;
     nav.appendChild(a);
@@ -409,6 +419,8 @@ async function showSection(key) {
   if (sec.custom === 'accounts') { renderAccounts(key, st); return; }
   if (sec.custom === 'carriers') { renderCarriers(key, st); return; }
   if (sec.custom === 'nodes') { renderNodes(key, st); return; }
+  if (sec.custom === 'users') { renderUsers(key, st); return; }
+  if (sec.custom === 'oplogs') { renderOplogs(key, st); return; }
   let fq = '';
   if (sec.filters) fq = filterQs(st.filters || {});
   const data = await api(sec.list + '?page=' + st.page + '&page_size=' + st.page_size + fq);
@@ -430,8 +442,11 @@ function renderTable(key, rows, st) {
   const sec = SECTIONS[key];
   if (!sec) { toast('未知模块: ' + key, true); return; }
   const c = document.getElementById('content');
+  // M3 T-301：viewer 只读 —— 隐藏「新增」按钮（write_guard 后端兜底，这里只是
+  // 不给无效入口；行内编辑/删除同理由 403 提示，Phase 2 权限矩阵再细化粒度）。
+  const isViewer = window._adminRole === 'viewer';
   let html = '<div class="section-head"><h2>' + sec.label + '</h2>' +
-    '<button class="btn btn-primary btn-sm" id="add-btn">+ 新增</button></div>';
+    (isViewer ? '' : '<button class="btn btn-primary btn-sm" id="add-btn">+ 新增</button>') + '</div>';
   if (sec.filters) html += filterBarHtml(key, sec, st || {});
   if (sec.topbar) html += topBarHtml(key, sec);
   html += '<div class="table-scroll">';
@@ -482,7 +497,8 @@ function renderTable(key, rows, st) {
   }
   html += '</div>';
   c.innerHTML = html;
-  document.getElementById('add-btn').onclick = function () { openForm(key, null); };
+  var addBtn = document.getElementById('add-btn');
+  if (addBtn) addBtn.onclick = function () { openForm(key, null); };  // viewer 无此按钮（null 安全）
   if (sec.filters) bindFilterBar(key, sec);
   if (sec.topbar) bindTopBar(key, sec);
 }
@@ -828,6 +844,9 @@ function closeModal() {
   document.getElementById('modal').classList.add('hidden');
   // #70：播放弹层会隐藏「保存」按钮（见 playRecording），关闭时恢复，供表单复用同一弹层。
   document.getElementById('modal-save').style.display = '';
+  // M3：手写弹层（用户管理等）临时替换过 save.onclick，关闭时恢复 SECTIONS 表单的
+  // 默认处理器（openForm 依赖启动期的一次性绑定，不重绑则编辑表单静默失效）。
+  document.getElementById('modal-save').onclick = saveForm;
 }
 document.getElementById('modal-close').onclick = closeModal;
 document.getElementById('modal-cancel').onclick = closeModal;
@@ -1521,16 +1540,23 @@ async function doLogin() {
 function doLogout() {
   api('/api/logout', 'POST').then(function () { location.reload(); }).catch(function () { location.reload(); });
 }
-function renderUser(user) {
+function renderUser(user, role) {
   window._adminUser = user;
-  document.getElementById('admin-user').textContent = '管理员：' + user;
+  // M3 T-301：记录角色（viewer=0 只读 / admin=1 业务 / super=2 用户管理+系统设置）。
+  // 旧网关 /api/me 无 role 字段 -> 回落 admin（与 authz._role_of fail-open 同口径）。
+  window._adminRole = role || 'admin';
+  document.getElementById('admin-user').textContent =
+    '管理员：' + user + (window._adminRole !== 'admin' ? '（' +
+      ({ viewer: '只读', super: '超级' })[window._adminRole] + '）' : '');
   document.getElementById('logout-btn').style.display = '';
+  var cpw = document.getElementById('chpw-btn'); if (cpw) cpw.style.display = '';
   hideLogin();
+  renderSidebar();  // 角色确定后重绘侧栏（按角色显隐 M3 入口）
 }
 async function bootAuth() {
   try {
     const me = await api('/api/me');
-    renderUser(me.user);
+    renderUser(me.user, me.role);
     showSection('access-points');
   } catch (e) {
     showLogin();
@@ -1538,3 +1564,189 @@ async function bootAuth() {
 }
 window.doLogin = doLogin;
 window.doLogout = doLogout;
+
+// ===========================================================================
+// M3 T-301 用户管理（Phase 1，2026-09-12 拍板）· 本区 M3 独占
+//   viewer(0) 只读 / admin(1) 业务管理 / super(2) 用户管理+系统设置
+//   本页 super-only：后端 require_role("super") 硬校验兜底，前端仅 UI。
+// ===========================================================================
+var ROLE_OPTS = [
+  { v: 0, t: 'viewer（只读）' },
+  { v: 1, t: 'admin（业务管理）' },
+  { v: 2, t: 'super（用户管理+系统设置）' },
+];
+function roleTxt(v) {
+  for (var i = 0; i < ROLE_OPTS.length; i++) if (ROLE_OPTS[i].v === v) return ROLE_OPTS[i].t;
+  return String(v);
+}
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function renderUsers(key, st) {
+  st = st || { page: 1, page_size: 50 };
+  var c = document.getElementById('content');
+  c.innerHTML =
+    '<div class="section-head"><h2>用户管理</h2>' +
+    '<button class="btn btn-primary" id="usr-new">＋ 新建用户</button></div>' +
+    '<div class="muted" style="margin-bottom:8px;font-size:12px">' +
+    '角色三档：viewer 只读（写操作全站 403）/ admin 业务管理 / super 用户管理+系统设置。' +
+    '守卫：最后一个启用的 super 不可降级/停用/删除；不可停用/降级/删除自己。</div>' +
+    '<table class="tbl" id="usr-tbl"><thead><tr>' +
+    '<th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th>' +
+    '</tr></thead><tbody></tbody></table>';
+  api('/api/users?page=' + st.page + '&page_size=' + st.page_size).then(function (d) {
+    var tb = document.querySelector('#usr-tbl tbody');
+    tb.innerHTML = '';
+    (d.items || []).forEach(function (u) {
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + u.id + '</td>' +
+        '<td>' + escHtml(u.username) + (u.username === window._adminUser ? ' <span class="muted">（我）</span>' : '') + '</td>' +
+        '<td>' + roleTxt(u.role) + '</td>' +
+        '<td>' + (u.status === 1 ? '<span class="ok">启用</span>' : '<span class="err">停用</span>') + '</td>' +
+        '<td>' + escHtml(u.created_at || '') + '</td>' +
+        '<td style="white-space:nowrap">' +
+        '<button class="btn btn-sm" data-act="edit" data-id="' + u.id + '">编辑</button> ' +
+        '<button class="btn btn-sm" data-act="reset" data-id="' + u.id + '">重置密码</button> ' +
+        '<button class="btn btn-sm" data-act="del" data-id="' + u.id + '">删除</button>' +
+        '</td>';
+      tr.querySelector('[data-act="edit"]').onclick = function () { usrEdit(u); };
+      tr.querySelector('[data-act="reset"]').onclick = function () { usrResetPw(u); };
+      tr.querySelector('[data-act="del"]').onclick = function () { usrDel(u); };
+      tb.appendChild(tr);
+    });
+    renderPager(key, d);
+  }).catch(function (e) { toast(e.message, true); });
+  document.getElementById('usr-new').onclick = function () { usrEdit(null); };
+}
+function usrEdit(u) {
+  var isNew = !u;
+  // M3 手写弹层（照录音回放模式；openForm 是 SECTIONS 驱动，不适配临时表单）
+  document.getElementById('modal-title').textContent = isNew ? '新建用户' : '编辑用户：' + u.username;
+  document.getElementById('modal-body').innerHTML =
+    (isNew ? '<div class="field"><label>用户名</label><input id="f_username" type="text" autocomplete="off"></div>' +
+      '<div class="field"><label>密码（≥8 位）</label><input id="f_password" type="password"></div>' : '') +
+    '<div class="field"><label>角色</label><select id="f_role">' +
+    ROLE_OPTS.map(function (o) { return '<option value="' + o.v + '"' + (u && u.role === o.v ? ' selected' : '') + '>' + o.t + '</option>'; }).join('') +
+    '</select></div>' +
+    '<div class="field"><label>状态</label><select id="f_status">' +
+    '<option value="1">启用</option><option value="0"' + (u && u.status === 0 ? ' selected' : '') + '>停用</option>' +
+    '</select></div>';
+  if (!isNew) document.getElementById('f_role').value = u.role;
+  var save = document.getElementById('modal-save');
+  save.style.display = '';
+  save.onclick = function () {
+    var body = isNew
+      ? { username: document.getElementById('f_username').value.trim(),
+          password: document.getElementById('f_password').value,
+          role: Number(document.getElementById('f_role').value),
+          status: Number(document.getElementById('f_status').value) }
+      : (function () {
+          var patch = {};
+          var role = Number(document.getElementById('f_role').value);
+          var status = Number(document.getElementById('f_status').value);
+          if (role !== u.role) patch.role = role;
+          if (status !== u.status) patch.status = status;
+          return patch;
+        })();
+    var req = isNew ? api('/api/users', 'POST', body)
+      : (Object.keys(body).length ? api('/api/users/' + u.id, 'PUT', body) : Promise.resolve(null));
+    req.then(function () { toast(isNew ? '已创建' : '已保存'); closeModal(); showSection('users'); })
+       .catch(function (e) { toast('保存失败：' + e.message, true); });
+  };
+  document.getElementById('modal').classList.remove('hidden');
+}
+function usrResetPw(u) {
+  document.getElementById('modal-title').textContent = '重置密码：' + u.username;
+  document.getElementById('modal-body').innerHTML =
+    '<div class="field"><label>新密码（≥8 位）</label><input id="f_password" type="password"></div>';
+  var save = document.getElementById('modal-save');
+  save.style.display = '';
+  save.onclick = function () {
+    api('/api/users/' + u.id + '/reset-password', 'POST',
+       { password: document.getElementById('f_password').value })
+      .then(function () { toast('密码已重置'); closeModal(); })
+      .catch(function (e) { toast('重置失败：' + e.message, true); });
+  };
+  document.getElementById('modal').classList.remove('hidden');
+}
+function usrDel(u) {
+  if (!window.confirm('确认删除用户 ' + u.username + '？')) return;
+  api('/api/users/' + u.id, 'DELETE').then(function () {
+    toast('已删除'); showSection('users');
+  }).catch(function (e) { toast('删除失败：' + e.message, true); });
+}
+// 顶部「修改自己的密码」入口（任何角色可用；后端要求旧口令）
+function changeOwnPassword() {
+  document.getElementById('modal-title').textContent = '修改我的密码';
+  document.getElementById('modal-body').innerHTML =
+    '<div class="field"><label>旧密码</label><input id="f_old_password" type="password"></div>' +
+    '<div class="field"><label>新密码（≥8 位）</label><input id="f_new_password" type="password"></div>';
+  var save = document.getElementById('modal-save');
+  save.style.display = '';
+  save.onclick = function () {
+    api('/api/users/me/password', 'POST', {
+      old_password: document.getElementById('f_old_password').value,
+      new_password: document.getElementById('f_new_password').value,
+    }).then(function () { toast('密码已修改'); closeModal(); })
+      .catch(function (e) { toast('修改失败：' + e.message, true); });
+  };
+  document.getElementById('modal').classList.remove('hidden');
+}
+window.changeOwnPassword = changeOwnPassword;
+
+// ===========================================================================
+// M3 T-301 操作日志（自动埋点查询面）· superOnly 入口，后端登录即可查（兜底）
+// ===========================================================================
+var OPLOG_ACTIONS = [
+  { v: 'post', t: 'post（创建）' }, { v: 'put', t: 'put（更新）' },
+  { v: 'patch', t: 'patch' }, { v: 'delete', t: 'delete（删除）' },
+];
+function renderOplogs(key, st) {
+  st = st || { page: 1, page_size: 50, operator: '', action: '' };
+  var c = document.getElementById('content');
+  c.innerHTML =
+    '<div class="section-head"><h2>操作日志</h2>' +
+    '<button class="btn btn-sm" id="oplog-refresh">刷新</button></div>' +
+    '<div class="filters" style="margin-bottom:8px">' +
+    '<input id="oplog-op" class="pager-input" placeholder="操作人（模糊）" style="width:140px" value="' + escHtml(st.operator || '') + '"> ' +
+    '<select id="oplog-act" class="pager-input"><option value="">全部动作</option>' +
+    OPLOG_ACTIONS.map(function (a) { return '<option value="' + a.v + '"' + (st.action === a.v ? ' selected' : '') + '>' + a.t + '</option>'; }).join('') +
+    '</select> <button class="btn btn-sm" id="oplog-go">查询</button></div>' +
+    '<table class="tbl" id="oplog-tbl"><thead><tr>' +
+    '<th>ID</th><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>详情</th>' +
+    '</tr></thead><tbody></tbody></table>';
+  var go = function () {
+    st.operator = document.getElementById('oplog-op').value.trim();
+    st.action = document.getElementById('oplog-act').value;
+    st.page = 1;
+    loadOplogs(key, st);
+  };
+  document.getElementById('oplog-go').onclick = go;
+  document.getElementById('oplog-refresh').onclick = function () { loadOplogs(key, st); };
+  loadOplogs(key, st);
+}
+function loadOplogs(key, st) {
+  var qs = '?page=' + st.page + '&page_size=' + st.page_size;
+  if (st.operator) qs += '&operator=' + encodeURIComponent(st.operator);
+  if (st.action) qs += '&action=' + encodeURIComponent(st.action);
+  api('/api/operation-logs' + qs).then(function (d) {
+    var tb = document.querySelector('#oplog-tbl tbody');
+    tb.innerHTML = '';
+    (d.items || []).forEach(function (r) {
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + r.id + '</td>' +
+        '<td>' + escHtml(r.created_at || '') + '</td>' +
+        '<td>' + escHtml(r.operator) + '</td>' +
+        '<td>' + escHtml(r.action) + '</td>' +
+        '<td title="' + escHtml(r.object_id || '') + '">' + escHtml(r.object_type) + '</td>' +
+        '<td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
+        escHtml(JSON.stringify(r.detail)) + '">' + escHtml(JSON.stringify(r.detail)) + '</td>';
+      tb.appendChild(tr);
+    });
+    renderPager(key, d);
+  }).catch(function (e) { toast(e.message, true); });
+}

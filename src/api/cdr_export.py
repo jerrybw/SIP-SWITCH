@@ -41,8 +41,13 @@ def export_cdr(start: str = Query(None, description="ISO 时间，如 2026-09-11
                limit: int = Query(10000, ge=1, le=100000),
                user: str = Depends(get_current_admin),
                db: Session = Depends(get_db)):
-    """CSV 导出（按 id 倒序，最多 limit 行）。"""
-    q = select(Cdr).order_by(Cdr.id.desc()).limit(limit)
+    """CSV 导出（按 id 倒序，最多 limit 行）。
+
+    时间过滤口径 = created_at（落库时间；分区表按此分布，终态覆盖语义见
+    README v0.4）—— 与 /api/cdr 列表的 start_time（通话发生时间）**刻意不同**：
+    导出场景关心「什么时候入库的话单」，如需按通话时间导出再演进。
+    """
+    q = select(Cdr)
     try:
         if start:
             q = q.where(Cdr.created_at >= datetime.fromisoformat(start))
@@ -51,6 +56,7 @@ def export_cdr(start: str = Query(None, description="ISO 时间，如 2026-09-11
     except ValueError:
         raise HTTPException(status_code=400,
                             detail="start/end 须为 ISO 时间格式，如 2026-09-11T00:00:00")
+    q = q.order_by(Cdr.id.desc()).limit(limit)
 
     buf = io.StringIO()
     writer = csv.writer(buf)

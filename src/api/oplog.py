@@ -9,14 +9,50 @@
    管理端写操作（POST/PUT/PATCH/DELETE 且路径以 /api/ 开头，排除 login/logout）
    成功或业务失败（<500）即记一行，operator 取当前登录用户。
 2. 显式埋点：业务代码记录非 HTTP 语义操作时调用 record_op(...)。
+
+查询面（2026-09-13 M3 收口补齐）：GET /api/operation-logs 分页 + operator/action
+过滤。⚠️ router 须在 app.py include_router(crud_router) 之前注册（PITFALLS #34，
+否则被 /api/{entity} 兜底吞掉）—— 需在 app.py 加一行挂载，**待维护者确认后挂**
+（app.py 冻结；users_router 同批已获认可的 +5 行不含本 router）。
 """
 from datetime import datetime
 
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 from db.models import OperationLog
-from db.session import SessionLocal
+from db.session import SessionLocal, get_db
+
+router = APIRouter(prefix="/api/operation-logs", tags=["oplog"])
 
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SKIP_PATHS = {"/api/login", "/api/logout"}
+
+
+@router.get("")
+def list_operation_logs(page: int = Query(1, ge=1),
+                        page_size: int = Query(50, ge=1, le=200),
+                        operator: str = None, action: str = None,
+                        db: Session = Depends(get_db)):
+    """管理端操作日志查询（只读；登录即可查，不做角色限制——审计面全员可见）。"""
+    q = select(OperationLog)
+    if operator:
+        q = q.where(OperationLog.operator.like("%" + operator + "%"))
+    if action:
+        q = q.where(OperationLog.action == action)
+    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    total_pages = (total + page_size - 1) // page_size if total else 1
+    if page > total_pages:
+        page = total_pages
+    rows = db.scalars(q.order_by(OperationLog.id.desc())
+                     .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [{"id": r.id, "operator": r.operator, "action": r.action,
+                       "object_type": r.object_type, "object_id": r.object_id,
+                       "detail": r.detail, "created_at": r.created_at}
+                      for r in rows],
+            "page": page, "page_size": page_size,
+            "total": total, "total_pages": total_pages}
 
 
 def record_op(operator, action, object_type, object_id=None, detail=None):
