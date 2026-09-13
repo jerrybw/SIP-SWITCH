@@ -982,3 +982,137 @@ def ensure_sys_user_seed(engine, admin_user: str, admin_password_hash: str) -> N
                   % admin_user)
         except Exception as e:
             print("[migrate] WARN sys_user seed failed: %s" % e)
+
+
+# ===========================================================================
+# M3 Phase 2：自定义角色 + 权限矩阵（2026-09-14，报备：尾部追加，串行合入）
+# 四步迁移 + 幂等判据：
+#   1. ensure_roles_tables            —— information_schema 查表存在性
+#   2. ensure_sys_user_role_code      —— information_schema 查列存在性
+#   3. ensure_roles_builtin_seed      —— INSERT IGNORE by code（重复键跳过）
+#   4. ensure_builtin_role_perm_seed  —— INSERT IGNORE by (role_code, feature)
+# 全部幂等：容器重启即重跑，已建/已回填/已种子均跳过。
+# 回滚：ENFORCE_ROLE=False 一键回 Phase 1 fail-open；DROP roles/role_perm +
+#       ALTER sys_user DROP COLUMN role_code 即回 Phase 1 形态。
+# ===========================================================================
+
+_BUILTIN_ROLES = [
+    # (code, name, sort) —— 内置三档，builtin=1 不可删不可停（防锁死守卫 1）
+    ("viewer", "只读", 0),
+    ("admin", "业务管理", 1),
+    ("super", "超级管理员", 2),
+]
+
+# 内置三档等价矩阵（14 feature，拍板 P1-P4 已含收紧口径）：
+#   viewer = 全部 read，唯 cdr.export=none（P4：全量号码+计费 CSV 不给只读角色）
+#   admin  = 业务域 write；nodes 收紧 read（P2：全节点重扫高危）；system 收紧 read（P3）；
+#            users=none（Phase 1 语义）；cdr.export=write
+#   super  = 全部 write（含 users）
+_BUILTIN_PERMS = {
+    "viewer": {"access-points": "read", "gateways": "read", "routes": "read",
+               "rules": "read", "sip-phones": "read", "carriers": "read",
+               "accounts": "read", "billing": "read", "cdr": "read",
+               "cdr.export": "none", "nodes": "read", "users": "none",
+               "oplogs": "read", "system": "read"},
+    "admin": {"access-points": "write", "gateways": "write", "routes": "write",
+              "rules": "write", "sip-phones": "write", "carriers": "write",
+              "accounts": "write", "billing": "write", "cdr": "read",
+              "cdr.export": "write", "nodes": "read", "users": "none",
+              "oplogs": "read", "system": "read"},
+    "super": {"access-points": "write", "gateways": "write", "routes": "write",
+              "rules": "write", "sip-phones": "write", "carriers": "write",
+              "accounts": "write", "billing": "write", "cdr": "write",
+              "cdr.export": "write", "nodes": "write", "users": "write",
+              "oplogs": "read", "system": "write"},
+}
+
+
+def ensure_roles_tables(engine) -> None:
+    """M3-P2 步骤 1：建 roles / role_perm 两表（幂等：IF NOT EXISTS）。"""
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS roles ("
+                " id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+                " code VARCHAR(32) NOT NULL,"
+                " name VARCHAR(64) NOT NULL,"
+                " builtin TINYINT NOT NULL DEFAULT 0,"
+                " enabled TINYINT NOT NULL DEFAULT 1,"
+                " sort INT NOT NULL DEFAULT 0,"
+                " created_at DATETIME NULL,"
+                " UNIQUE KEY uq_roles_code (code)"
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS role_perm ("
+                " id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+                " role_code VARCHAR(32) NOT NULL,"
+                " feature VARCHAR(32) NOT NULL,"
+                " perm VARCHAR(8) NOT NULL DEFAULT 'none',"
+                " UNIQUE KEY uq_role_perm (role_code, feature)"
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
+            conn.commit()
+            print("[migrate] roles / role_perm tables ensured")
+        except Exception as e:
+            print("[migrate] WARN roles tables failed: %s" % e)
+
+
+def ensure_sys_user_role_code(engine) -> None:
+    """M3-P2 步骤 2：sys_user 加可空 role_code，按 int 三档回填（均幂等）。"""
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        try:
+            exists = conn.execute(text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = 'sys_user' "
+                "AND column_name = 'role_code'")).scalar()
+            if not exists:
+                conn.execute(text(
+                    "ALTER TABLE sys_user ADD COLUMN role_code VARCHAR(32) NULL"))
+                conn.commit()
+                print("[migrate] sys_user.role_code added")
+            conn.execute(text(
+                "UPDATE sys_user SET role_code = ELT(role+1, 'viewer','admin','super') "
+                "WHERE role_code IS NULL AND role IN (0,1,2)"))
+            conn.commit()
+        except Exception as e:
+            print("[migrate] WARN sys_user.role_code failed: %s" % e)
+
+
+def ensure_roles_builtin_seed(engine) -> None:
+    """M3-P2 步骤 3：内置三档种子（幂等：INSERT IGNORE by code）。"""
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        try:
+            for code, name, sort in _BUILTIN_ROLES:
+                conn.execute(text(
+                    "INSERT IGNORE INTO roles (code, name, builtin, enabled, sort, created_at) "
+                    "VALUES (:c, :n, 1, 1, :s, NOW())"),
+                    {"c": code, "n": name, "s": sort})
+            conn.commit()
+        except Exception as e:
+            print("[migrate] WARN builtin roles seed failed: %s" % e)
+
+
+def ensure_builtin_role_perm_seed(engine) -> None:
+    """M3-P2 步骤 4：内置三档 role_perm 回填（幂等：INSERT IGNORE by 键）。
+
+    ⚠️ 只补**缺失行**，不覆盖用户自定义过的行——管理员若改过内置角色矩阵，
+    重启不回滚（否则改了白改）。
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        try:
+            for role_code, perms in _BUILTIN_PERMS.items():
+                for feature, perm in perms.items():
+                    conn.execute(text(
+                        "INSERT IGNORE INTO role_perm (role_code, feature, perm) "
+                        "VALUES (:r, :f, :p)"),
+                        {"r": role_code, "f": feature, "p": perm})
+            conn.commit()
+        except Exception as e:
+            print("[migrate] WARN builtin role_perm seed failed: %s" % e)

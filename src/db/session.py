@@ -83,6 +83,13 @@ ensure_gateway_node_backfill(_write_engine)
 # ⚠️ migrate.py 尾部追加，已按协作约定报备（见 PR 描述）
 from db.migrate import ensure_sys_user_role_comment, ensure_sys_user_seed  # noqa: E402
 ensure_sys_user_role_comment(_write_engine)
+# M3-P2 自定义角色 + 权限矩阵（尾部追加报备，2026-09-14）
+from db.migrate import (ensure_roles_tables, ensure_sys_user_role_code,  # noqa: E402
+                        ensure_roles_builtin_seed, ensure_builtin_role_perm_seed)
+ensure_roles_tables(_write_engine)
+ensure_sys_user_role_code(_write_engine)
+ensure_roles_builtin_seed(_write_engine)
+ensure_builtin_role_perm_seed(_write_engine)
 _a = settings.get("auth") or {}
 ensure_sys_user_seed(_write_engine, _a.get("admin_user") or "",
                      _a.get("admin_password_hash") or "")
