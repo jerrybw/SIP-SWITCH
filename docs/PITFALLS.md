@@ -103,6 +103,7 @@
 | 62 | `fs_node.status` 是**最后写入值**且无心跳超时判定 → 写入方（该节点自己的 gateway）进程一死即「**僵尸在线**」；判据看 `last_heartbeat_at` 而非 `status`（✅ **已修 #73**：B1 展示层现算 stale + B2 任一存活节点跨节点清扫置 0 并告警） |
 | 63 | 心跳超时阈值**必须 ≥ 3×探测周期**：心跳每周期才写一次，阈值 ≤ 周期时**健康节点会在下一次心跳到来前被对端判离线** → 互判/来回翻转/刷告警（实测：周期 30s + 阈值 10s，两健康节点互相把对方置 0）。显式值低于下限须**钳制并打 warning**（别静默忽略，见 #53 同型陷阱） |
 | 64 | 热配**探测周期变更必须 ≤5s 生效**：一次 `wait(interval)` 会让改小后的周期仍按旧的长节奏写心跳，从而触发 #63 的误判；**只分片但 deadline 在进入时定死是伪修复**（实测两次踩坑）→ 正确写法：每片 ≤5s 重读配置、按「距上次探测 ≥ 当前周期」判断结束 |
+| 73 | `UnboundLocalError`（引用未定义变量）让带 `cdr_*` 的**所有正常呼叫** HANGUP 处理中断 → 话单全 UNKNOWN + `fs_node_uuid=NULL`（reconcile 回填指纹）。**用 `pyflakes` 静态抓 undefined name**（✅ 已修，P2-a `bac057f` 引入） |
 
 ---
 
@@ -467,3 +468,21 @@
     - **修法**：`internal.xml` 的 `challenge-realm` 改 `$${domain}`（与 `force-register-domain` 同源）；**不要**改用 `$${external_sip_ip}`（那是 STUN 探测值，可能是公网 IP）。
     - **排查方法**：① 模拟软电话完整 digest 注册脚本（401→带 Authorization 重发）复现，比抓用户话机快；② 对比 `global_getvar domain` 与 401 里的 `realm=`；③ 注意 **docker DNAT 规则带 `! -i br-*`**，从容器内访问宿主对外 IP:5060 不做 DNAT —— **容器内的测试结果不代表话机路径**，必须用宿主（或真实话机）测。
     - **易误判**：症状像「IP 注入错乱」或「profile 挂了」，实际 profile 正常（会回 401）、IP 注入也正常，是**鉴权 realm 口径**问题。
+
+73. **`UnboundLocalError` 让「所有正常呼叫」的 HANGUP 处理静默失败 → 话单全 UNKNOWN（2026-09-13 实测，已修）**：
+    - **现象**：话单 `hangup_cause=UNKNOWN`、`answer_time`/`talk_duration` 为 NULL、`cost=0`、
+      **`fs_node_uuid=NULL`**（最后一项是「reconcile 回填骨架」的指纹）。而 **FS 侧 XML CDR 显示
+      `NORMAL_CLEARING` + `billsec=2`** —— 呼叫其实完全正常，问题在网关。
+    - **根因**：`esl_client.handle_event()`（`bac057f` P2-a 引入）
+      `if (concurrency.backend() == "redis" and rec and rec.get("gateway_id")):`
+      —— **`rec` 在该作用域从未定义**（同函数内只有 `rec_file`）。只要事件携带 `cdr_*` 变量
+      （dialplan 每次呼叫都 `set`）就走到这行 → `UnboundLocalError` → 整个事件处理中断 → HANGUP 不被处理。
+    - **为何长期未暴露**：① Python 短路求值 —— `backend()=="redis"` 为假时不碰 `rec`，
+      所以**只在 redis 形态下炸**；② 异常被 `handle_event` 的外层 except 吞成一行
+      `[ESL] handle error: ...`，**无堆栈**；③ 单测覆盖不到该分支（需带 `cdr_*` 的真实事件）。
+    - **修法**：`_rec_gw = (_call_store.get(leg_uuid) or {}).get("gateway_id")` 后再判空。
+      **不要**改用 `cdr_gw` —— HANGUP 偶发不带 `variable_*`（见函数内 T-207 注释）。
+    - **★ 通用教训（建议进提交前检查）**：`python3 -m pyflakes src/` 能**静态**抓出 `undefined name`，
+      而这类 bug 恰恰是动态测试最容易漏的。本次全仓仅此 1 处（其余为无害的 unused import）。
+    - **判据**：`docker logs <gateway> | grep -c "cannot access local variable"` > 0；
+      或 CDR 行 `fs_node_uuid IS NULL AND hangup_cause='UNKNOWN'`。

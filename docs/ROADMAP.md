@@ -585,3 +585,43 @@ role 列无实际意义。用户管理是角色体系成立的前提，纳入 M3
 - `docker-compose.yml`：FS 段加卷 `./data/xml_cdr:/usr/local/freeswitch/log/xml_cdr`
 - **实证**：`module_exists mod_xml_cdr` 由 `false` → `true`；抓 fixture 零网络依赖（`log-dir` 即留档）
 
+## 2026-09-13 修复记录（三：P2-a `UnboundLocalError`，话单全 UNKNOWN 的真因，dev 验证通过）
+
+**用户报**：打完电话看话单仍异常（`e636b24e-...`）。
+
+**排查关键**：FS 侧 XML CDR 显示该通话 **`NORMAL_CLEARING` + `billsec=2` + `sip_term_status=200`**
+（即呼叫完全正常、接通 2 秒），但网关落库是 UNKNOWN → **问题在网关事件处理，不在 FS、不在 CDR 表**。
+
+**根因**：网关日志每通电话刷 4 次
+`[ESL] handle error: cannot access local variable 'rec' where it is not associated with a value`
+→ `handle_event()` 抛 `UnboundLocalError`，**HANGUP 事件根本没被处理** → reconcile 按「丢 HANGUP」回填骨架。
+
+出问题的代码（`src/esl_client.py`，`bac057f` P2-a 引入）：
+```python
+if (concurrency.backend() == "redis" and rec and rec.get("gateway_id")):   # rec 未定义！
+    concurrency.transfer_leg(leg_uuid, rec["gateway_id"], NODE_UUID)
+```
+该作用域内只有 `rec_file`，从无 `rec`。因 Python 短路求值，**仅在 `backend()=="redis"` 时才会踩到** —— 
+而 dev/生产都是 redis，所以「每通电话都崩」。
+
+**修复**：改从 `_call_store` 取该腿的 gateway_id（与函数内 T-207 注释一致 —— HANGUP 偶发不带 `variable_cdr_*`）：
+```python
+_rec_gw = (_call_store.get(leg_uuid) or {}).get("gateway_id")
+if concurrency.backend() == "redis" and _rec_gw:
+    concurrency.transfer_leg(leg_uuid, _rec_gw, NODE_UUID)
+```
+
+**验证（dev）**：
+- 修复前该错误累计 **8 次**；修复后 `grep -c` = **0**
+- 构造真实呼叫（走 dialplan）→ CDR：`hangup_cause=INCOMPATIBLE_DESTINATION`（**真实值**）、
+  `fs_node_uuid=2a5f89f1b0f0ce74`（**非 NULL**，证明由 ESL 主路径落库而非 reconcile 回填）
+- 修复后无 `[ESL] handle error`
+
+**⚠️ 与「修复记录（二）①」是两个独立 bug 叠加**：
+- ①（`reject_reason` 超长）只影响**被并发闸门拒绝**的呼叫
+- ③（本条 UnboundLocalError）影响**所有带 `cdr_*` 变量的正常呼叫**
+两者都表现为 `hangup_cause=UNKNOWN`，需分别按「有无 `reject_reason`」「违反常理的通话时长」区分。
+
+**方法论沉淀**：`python3 -m pyflakes src/` 可静态抓出 `undefined name` 类缺陷（本次全仓仅 1 处）。
+**建议纳入提交前检查** —— 这类 bug 动态测试极难覆盖。详见 PITFALLS #73。
+

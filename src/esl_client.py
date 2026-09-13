@@ -574,10 +574,12 @@ def handle_event(event) -> None:
             # P2-a：cdr_gateway_id 已到达（实际落地 gw）→ 与预留凭证不一致则转移
             # （T-205 failover 换腿场景：预留的是 candidates[0]，实际 bridge 成功的可能
             #   是第 N 腿）。幂等：凭证已指向该 gw 则不动。
-            if (concurrency.backend() == "redis" and rec
-                    and rec.get("gateway_id")):
+            # 从 _call_store 取该腿的 gateway_id：HANGUP 偶发不带 variable_cdr_*
+            # （见本函数上方 T-207 注释），且此处不得引用未定义的局部变量。
+            _rec_gw = (_call_store.get(leg_uuid) or {}).get("gateway_id")
+            if concurrency.backend() == "redis" and _rec_gw:
                 try:
-                    concurrency.transfer_leg(leg_uuid, rec["gateway_id"], NODE_UUID)
+                    concurrency.transfer_leg(leg_uuid, _rec_gw, NODE_UUID)
                 except Exception as _te:
                     print("[conc] transfer error uuid=%s: %s" % (leg_uuid[:8], _te), flush=True)
 
