@@ -1,0 +1,401 @@
+<?xml version="1.0"?>
+<cdr core-uuid="e9ee849b-a697-450b-9a8d-941d703561d6" switchname="21fc12595b51">
+  <channel_data>
+    <state>CS_REPORTING</state>
+    <direction>inbound</direction>
+    <state_number>11</state_number>
+    <flags>0=1;1=1;3=1;39=1;40=1;42=1;45=1;50=1;55=1;95=1;107=1;113=1;114=1;123=1;160=1;165=1;166=1</flags>
+    <caps>1=1;2=1;3=1;4=1;5=1;6=1;8=1;9=1;10=1</caps>
+  </channel_data>
+  <call-stats>
+    <audio>
+      <inbound>
+        <raw_bytes>179396</raw_bytes>
+        <media_bytes>179396</media_bytes>
+        <packet_count>1043</packet_count>
+        <media_packet_count>1043</media_packet_count>
+        <skip_packet_count>11</skip_packet_count>
+        <jitter_packet_count>0</jitter_packet_count>
+        <dtmf_packet_count>0</dtmf_packet_count>
+        <cng_packet_count>0</cng_packet_count>
+        <flush_packet_count>0</flush_packet_count>
+        <largest_jb_size>0</largest_jb_size>
+        <jitter_min_variance>0.78</jitter_min_variance>
+        <jitter_max_variance>12.31</jitter_max_variance>
+        <jitter_loss_rate>0.00</jitter_loss_rate>
+        <jitter_burst_rate>0.00</jitter_burst_rate>
+        <mean_interval>20.00</mean_interval>
+        <flaw_total>0</flaw_total>
+        <quality_percentage>100.00</quality_percentage>
+        <mos>4.50</mos>
+      </inbound>
+      <outbound>
+        <raw_bytes>180600</raw_bytes>
+        <media_bytes>180600</media_bytes>
+        <packet_count>1050</packet_count>
+        <media_packet_count>1050</media_packet_count>
+        <skip_packet_count>0</skip_packet_count>
+        <dtmf_packet_count>0</dtmf_packet_count>
+        <cng_packet_count>0</cng_packet_count>
+        <rtcp_packet_count>0</rtcp_packet_count>
+        <rtcp_octet_count>0</rtcp_octet_count>
+      </outbound>
+    </audio>
+  </call-stats>
+  <variables>
+    <direction>inbound</direction>
+    <uuid>0fad61b6-a704-4292-890a-0f2e43581721</uuid>
+    <session_id>22</session_id>
+    <sip_from_user>80000001</sip_from_user>
+    <sip_from_port>5060</sip_from_port>
+    <sip_from_uri>80000001%40192.0.2.10%3A5060</sip_from_uri>
+    <sip_from_host>192.0.2.10</sip_from_host>
+    <channel_name>sofia/internal/80000001%40192.0.2.10%3A5060</channel_name>
+    <sip_local_network_addr>192.0.2.10</sip_local_network_addr>
+    <sip_network_ip>192.0.2.1</sip_network_ip>
+    <sip_network_port>17586</sip_network_port>
+    <sip_invite_stamp>1789286991247890</sip_invite_stamp>
+    <sip_received_ip>192.0.2.1</sip_received_ip>
+    <sip_received_port>17586</sip_received_port>
+    <sip_via_protocol>udp</sip_via_protocol>
+    <sip_authorized>true</sip_authorized>
+    <Event-Name>REQUEST_PARAMS</Event-Name>
+    <Core-UUID>e9ee849b-a697-450b-9a8d-941d703561d6</Core-UUID>
+    <FreeSWITCH-Hostname>21fc12595b51</FreeSWITCH-Hostname>
+    <FreeSWITCH-Switchname>21fc12595b51</FreeSWITCH-Switchname>
+    <FreeSWITCH-IPv4>172.18.0.2</FreeSWITCH-IPv4>
+    <FreeSWITCH-IPv6>%3A%3A1</FreeSWITCH-IPv6>
+    <Event-Date-Local>2026-09-13%2008%3A09%3A51</Event-Date-Local>
+    <Event-Date-GMT>Sun,%2013%20Sep%202026%2008%3A09%3A51%20GMT</Event-Date-GMT>
+    <Event-Date-Timestamp>1789286991247890</Event-Date-Timestamp>
+    <Event-Calling-File>sofia.c</Event-Calling-File>
+    <Event-Calling-Function>sofia_handle_sip_i_invite</Event-Calling-Function>
+    <Event-Calling-Line-Number>10735</Event-Calling-Line-Number>
+    <Event-Sequence>2294</Event-Sequence>
+    <sip_number_alias>80000001</sip_number_alias>
+    <sip_auth_username>80000001</sip_auth_username>
+    <sip_auth_realm>172.18.0.2</sip_auth_realm>
+    <number_alias>80000001</number_alias>
+    <requested_user_name>80000001</requested_user_name>
+    <requested_domain_name>172.18.0.2</requested_domain_name>
+    <user_name>80000001</user_name>
+    <domain_name>172.18.0.2</domain_name>
+    <sip_from_user_stripped>80000001</sip_from_user_stripped>
+    <sofia_profile_name>internal</sofia_profile_name>
+    <sofia_profile_url>sip%3Amod_sofia%40192.0.2.10%3A5060</sofia_profile_url>
+    <recovery_profile_name>internal</recovery_profile_name>
+    <sip_allow>INVITE,%20ACK,%20CANCEL,%20OPTIONS,%20BYE,%20REFER,%20NOTIFY,%20MESSAGE,%20SUBSCRIBE,%20INFO</sip_allow>
+    <sip_req_user>ccccc</sip_req_user>
+    <sip_req_port>5060</sip_req_port>
+    <sip_req_uri>ccccc%40192.0.2.10%3A5060</sip_req_uri>
+    <sip_req_host>192.0.2.10</sip_req_host>
+    <sip_to_user>ccccc</sip_to_user>
+    <sip_to_port>5060</sip_to_port>
+    <sip_to_uri>ccccc%40192.0.2.10%3A5060</sip_to_uri>
+    <sip_to_host>192.0.2.10</sip_to_host>
+    <sip_contact_user>80000001</sip_contact_user>
+    <sip_contact_port>17586</sip_contact_port>
+    <sip_contact_uri>80000001%40192.0.2.1%3A17586</sip_contact_uri>
+    <sip_contact_host>192.0.2.1</sip_contact_host>
+    <sip_via_host>192.0.2.1</sip_via_host>
+    <sip_via_port>17586</sip_via_port>
+    <sip_via_rport>17586</sip_via_rport>
+    <max_forwards>70</max_forwards>
+    <presence_id>80000001%40192.0.2.10</presence_id>
+    <switch_r_sdp>v%3D0%0D%0Ao%3D-%202%202%20IN%20IP4%20192.0.2.1%0D%0As%3DCounterPath%20eyeBeam%201.5%0D%0Ac%3DIN%20IP4%20192.0.2.1%0D%0At%3D0%200%0D%0Am%3Daudio%2059488%20RTP/AVP%200%208%2018%20101%0D%0Aa%3Drtpmap%3A18%20G729/8000%0D%0Aa%3Dfmtp%3A18%20annexb%3Dno%0D%0Aa%3Drtpmap%3A101%20telephone-event/8000%0D%0Aa%3Dfmtp%3A101%200-15%0D%0Aa%3Dalt%3A1%203%20%3A%20oRn7X/T9%20LVRg94t7%20192.168.0.202%2059488%0D%0Aa%3Dalt%3A2%202%20%3A%202eFejwOX%20dwdqxNhe%20192.168.2.154%2059488%0D%0Aa%3Dalt%3A3%201%20%3A%20xA%2BR7pX/%20p2d%2BYUl1%20192.0.2.1%2059488%0D%0Aa%3Dx-rtp-session-id%3A8F9AB236DF22469EB550C7AEBDF5B3DB%0D%0A</switch_r_sdp>
+    <ep_codec_string>CORE_PCM_MODULE.PCMU%408000h%4020i%4064000b,CORE_PCM_MODULE.PCMA%408000h%4020i%4064000b</ep_codec_string>
+    <DP_MATCH>ccccc</DP_MATCH>
+    <DP_MATCH>ccccc</DP_MATCH>
+    <call_uuid>0fad61b6-a704-4292-890a-0f2e43581721</call_uuid>
+    <call_timeout>10</call_timeout>
+    <sip-force-contact>NDLB-connectile-dysfunction</sip-force-contact>
+    <cdr_account_id>8004</cdr_account_id>
+    <cdr_caller_in>80000001</cdr_caller_in>
+    <cdr_callee_in>ccccc</cdr_callee_in>
+    <cdr_caller_mid>80000001</cdr_caller_mid>
+    <cdr_callee_mid>ccccc</cdr_callee_mid>
+    <cdr_gateway_id>7</cdr_gateway_id>
+    <cdr_carrier_id>4</cdr_carrier_id>
+    <cdr_callee_out>ccccc</cdr_callee_out>
+    <cdr_caller_out>80000001</cdr_caller_out>
+    <effective_caller_id_number>80000001</effective_caller_id_number>
+    <caller_id_number>80000001</caller_id_number>
+    <cdr_caller_type>phone</cdr_caller_type>
+    <cdr_dst_ip>sipp-reg</cdr_dst_ip>
+    <cdr_dst_port>5060</cdr_dst_port>
+    <cdr_switch_count>0</cdr_switch_count>
+    <cdr_bill_unit>60</cdr_bill_unit>
+    <cdr_switch_detail>%3B7%3Accccc%3A0%3A1%3AWIN</cdr_switch_detail>
+    <hangup_after_bridge>true</hangup_after_bridge>
+    <rec_file>/recordings/2a5f89f1b0f0ce74/0fad61b6-a704-4292-890a-0f2e43581721.wav</rec_file>
+    <rtp_use_codec_string>OPUS,G722,PCMU,PCMA,H264,VP8</rtp_use_codec_string>
+    <remote_video_media_flow>inactive</remote_video_media_flow>
+    <remote_text_media_flow>inactive</remote_text_media_flow>
+    <remote_audio_media_flow>sendrecv</remote_audio_media_flow>
+    <rtp_audio_recv_pt>0</rtp_audio_recv_pt>
+    <rtp_use_codec_name>PCMU</rtp_use_codec_name>
+    <rtp_use_codec_rate>8000</rtp_use_codec_rate>
+    <rtp_use_codec_ptime>20</rtp_use_codec_ptime>
+    <rtp_use_codec_channels>1</rtp_use_codec_channels>
+    <rtp_last_audio_codec_string>PCMU%408000h%4020i%401c</rtp_last_audio_codec_string>
+    <read_codec>PCMU</read_codec>
+    <original_read_codec>PCMU</original_read_codec>
+    <read_rate>8000</read_rate>
+    <original_read_rate>8000</original_read_rate>
+    <write_codec>PCMU</write_codec>
+    <write_rate>8000</write_rate>
+    <dtmf_type>rfc2833</dtmf_type>
+    <local_media_ip>172.18.0.2</local_media_ip>
+    <local_media_port>20072</local_media_port>
+    <advertised_media_ip>192.0.2.10</advertised_media_ip>
+    <rtp_use_timer_name>soft</rtp_use_timer_name>
+    <rtp_use_pt>0</rtp_use_pt>
+    <rtp_use_ssrc>112241959</rtp_use_ssrc>
+    <rtp_2833_send_payload>101</rtp_2833_send_payload>
+    <rtp_2833_recv_payload>101</rtp_2833_recv_payload>
+    <remote_media_ip>192.0.2.1</remote_media_ip>
+    <remote_media_port>59488</remote_media_port>
+    <current_application_data>sofia/gateway/testgateway/ccccc</current_application_data>
+    <current_application>bridge</current_application>
+    <originated_legs>8be2e963-7465-4c80-a302-0c0a9878a410%3BOutbound%20Call%3Bccccc</originated_legs>
+    <switch_m_sdp>v%3D0%0D%0Ao%3Dsipp%201%201%20IN%20IP4%20172.18.0.7%0D%0As%3Dsipp%0D%0Ac%3DIN%20IP4%20172.18.0.7%0D%0At%3D0%200%0D%0Am%3Daudio%206000%20RTP/AVP%200%208%0D%0Aa%3Drtpmap%3A0%20PCMU/8000%0D%0Aa%3Drtpmap%3A8%20PCMA/8000%0D%0A</switch_m_sdp>
+    <video_media_flow>inactive</video_media_flow>
+    <text_media_flow>inactive</text_media_flow>
+    <audio_media_flow>sendrecv</audio_media_flow>
+    <rtp_local_sdp_str>v%3D0%0D%0Ao%3DFreeSWITCH%201789266919%201789266921%20IN%20IP4%20192.0.2.10%0D%0As%3DFreeSWITCH%0D%0Ac%3DIN%20IP4%20192.0.2.10%0D%0At%3D0%200%0D%0Am%3Daudio%2020072%20RTP/AVP%200%20101%0D%0Aa%3Drtpmap%3A0%20PCMU/8000%0D%0Aa%3Drtpmap%3A101%20telephone-event/8000%0D%0Aa%3Dfmtp%3A101%200-15%0D%0Aa%3Dptime%3A20%0D%0Aa%3Dsendrecv%0D%0A</rtp_local_sdp_str>
+    <sip_nat_detected>true</sip_nat_detected>
+    <endpoint_disposition>ANSWER</endpoint_disposition>
+    <originate_disposition>SUCCESS</originate_disposition>
+    <DIALSTATUS>SUCCESS</DIALSTATUS>
+    <originate_causes>8be2e963-7465-4c80-a302-0c0a9878a410%3BNONE</originate_causes>
+    <last_bridge_to>8be2e963-7465-4c80-a302-0c0a9878a410</last_bridge_to>
+    <bridge_channel>sofia/external/ccccc</bridge_channel>
+    <bridge_uuid>8be2e963-7465-4c80-a302-0c0a9878a410</bridge_uuid>
+    <signal_bond>8be2e963-7465-4c80-a302-0c0a9878a410</signal_bond>
+    <sip_to_tag>BvU0698X8gegg</sip_to_tag>
+    <sip_from_tag>1e6e6367</sip_from_tag>
+    <sip_cseq>2</sip_cseq>
+    <sip_call_id>ZDQ2MzgzZjlhZDIzYzIxNzY2NTFiMGFjOGVmYWI0NDQ.</sip_call_id>
+    <sip_full_via>SIP/2.0/UDP%20192.0.2.1%3A17586%3Bbranch%3Dz9hG4bK-d87543-bf54c5783c1c9418-1--d87543-%3Brport%3D17586</sip_full_via>
+    <sip_from_display>80000001</sip_from_display>
+    <sip_full_from>%2280000001%22%20%3Csip%3A80000001%40192.0.2.10%3A5060%3E%3Btag%3D1e6e6367</sip_full_from>
+    <sip_to_display>ccccc</sip_to_display>
+    <sip_full_to>%22ccccc%22%20%3Csip%3Accccc%40192.0.2.10%3A5060%3E%3Btag%3DBvU0698X8gegg</sip_full_to>
+    <last_sent_callee_id_name>Outbound%20Call</last_sent_callee_id_name>
+    <last_sent_callee_id_number>ccccc</last_sent_callee_id_number>
+    <sip_reason>SIP%3Bdescription%3D%22User%20Hung%20Up%22</sip_reason>
+    <sip_term_status>200</sip_term_status>
+    <proto_specific_hangup_cause>sip%3A200</proto_specific_hangup_cause>
+    <sip_term_cause>16</sip_term_cause>
+    <last_bridge_role>originator</last_bridge_role>
+    <sip_user_agent>eyeBeam%20release%201011d%20stamp%2040820</sip_user_agent>
+    <sip_hangup_disposition>recv_bye</sip_hangup_disposition>
+    <bridge_hangup_cause>NORMAL_CLEARING</bridge_hangup_cause>
+    <record_file_size>336364</record_file_size>
+    <record_samples>168160</record_samples>
+    <record_seconds>21</record_seconds>
+    <record_ms>21020</record_ms>
+    <record_completion_cause>success-silence</record_completion_cause>
+    <hangup_cause>NORMAL_CLEARING</hangup_cause>
+    <hangup_cause_q850>16</hangup_cause_q850>
+    <digits_dialed>none</digits_dialed>
+    <start_stamp>2026-09-13%2008%3A09%3A51</start_stamp>
+    <profile_start_stamp>2026-09-13%2008%3A09%3A51</profile_start_stamp>
+    <answer_stamp>2026-09-13%2008%3A09%3A51</answer_stamp>
+    <bridge_stamp>2026-09-13%2008%3A09%3A51</bridge_stamp>
+    <progress_media_stamp>2026-09-13%2008%3A09%3A51</progress_media_stamp>
+    <end_stamp>2026-09-13%2008%3A10%3A12</end_stamp>
+    <start_epoch>1789286991</start_epoch>
+    <start_uepoch>1789286991327858</start_uepoch>
+    <profile_start_epoch>1789286991</profile_start_epoch>
+    <profile_start_uepoch>1789286991327858</profile_start_uepoch>
+    <answer_epoch>1789286991</answer_epoch>
+    <answer_uepoch>1789286991527857</answer_uepoch>
+    <bridge_epoch>1789286991</bridge_epoch>
+    <bridge_uepoch>1789286991527857</bridge_uepoch>
+    <last_hold_epoch>0</last_hold_epoch>
+    <last_hold_uepoch>0</last_hold_uepoch>
+    <hold_accum_seconds>0</hold_accum_seconds>
+    <hold_accum_usec>0</hold_accum_usec>
+    <hold_accum_ms>0</hold_accum_ms>
+    <resurrect_epoch>0</resurrect_epoch>
+    <resurrect_uepoch>0</resurrect_uepoch>
+    <progress_epoch>0</progress_epoch>
+    <progress_uepoch>0</progress_uepoch>
+    <progress_media_epoch>1789286991</progress_media_epoch>
+    <progress_media_uepoch>1789286991487845</progress_media_uepoch>
+    <end_epoch>1789287012</end_epoch>
+    <end_uepoch>1789287012547881</end_uepoch>
+    <last_app>bridge</last_app>
+    <last_arg>sofia/gateway/testgateway/ccccc</last_arg>
+    <caller_id>%2280000001%22%20%3C80000001%3E</caller_id>
+    <duration>21</duration>
+    <billsec>21</billsec>
+    <progresssec>0</progresssec>
+    <answersec>0</answersec>
+    <waitsec>0</waitsec>
+    <progress_mediasec>0</progress_mediasec>
+    <flow_billsec>21</flow_billsec>
+    <mduration>21220</mduration>
+    <billmsec>21020</billmsec>
+    <progressmsec>0</progressmsec>
+    <answermsec>200</answermsec>
+    <waitmsec>200</waitmsec>
+    <progress_mediamsec>160</progress_mediamsec>
+    <flow_billmsec>21220</flow_billmsec>
+    <uduration>21220023</uduration>
+    <billusec>21020024</billusec>
+    <progressusec>0</progressusec>
+    <answerusec>199999</answerusec>
+    <waitusec>199999</waitusec>
+    <progress_mediausec>159987</progress_mediausec>
+    <flow_billusec>21220023</flow_billusec>
+    <rtp_audio_in_raw_bytes>179396</rtp_audio_in_raw_bytes>
+    <rtp_audio_in_media_bytes>179396</rtp_audio_in_media_bytes>
+    <rtp_audio_in_packet_count>1043</rtp_audio_in_packet_count>
+    <rtp_audio_in_media_packet_count>1043</rtp_audio_in_media_packet_count>
+    <rtp_audio_in_skip_packet_count>11</rtp_audio_in_skip_packet_count>
+    <rtp_audio_in_jitter_packet_count>0</rtp_audio_in_jitter_packet_count>
+    <rtp_audio_in_dtmf_packet_count>0</rtp_audio_in_dtmf_packet_count>
+    <rtp_audio_in_cng_packet_count>0</rtp_audio_in_cng_packet_count>
+    <rtp_audio_in_flush_packet_count>0</rtp_audio_in_flush_packet_count>
+    <rtp_audio_in_largest_jb_size>0</rtp_audio_in_largest_jb_size>
+    <rtp_audio_in_jitter_min_variance>0.78</rtp_audio_in_jitter_min_variance>
+    <rtp_audio_in_jitter_max_variance>12.31</rtp_audio_in_jitter_max_variance>
+    <rtp_audio_in_jitter_loss_rate>0.00</rtp_audio_in_jitter_loss_rate>
+    <rtp_audio_in_jitter_burst_rate>0.00</rtp_audio_in_jitter_burst_rate>
+    <rtp_audio_in_mean_interval>20.00</rtp_audio_in_mean_interval>
+    <rtp_audio_in_flaw_total>0</rtp_audio_in_flaw_total>
+    <rtp_audio_in_quality_percentage>100.00</rtp_audio_in_quality_percentage>
+    <rtp_audio_in_mos>4.50</rtp_audio_in_mos>
+    <rtp_audio_out_raw_bytes>180600</rtp_audio_out_raw_bytes>
+    <rtp_audio_out_media_bytes>180600</rtp_audio_out_media_bytes>
+    <rtp_audio_out_packet_count>1050</rtp_audio_out_packet_count>
+    <rtp_audio_out_media_packet_count>1050</rtp_audio_out_media_packet_count>
+    <rtp_audio_out_skip_packet_count>0</rtp_audio_out_skip_packet_count>
+    <rtp_audio_out_dtmf_packet_count>0</rtp_audio_out_dtmf_packet_count>
+    <rtp_audio_out_cng_packet_count>0</rtp_audio_out_cng_packet_count>
+    <rtp_audio_rtcp_packet_count>0</rtp_audio_rtcp_packet_count>
+    <rtp_audio_rtcp_octet_count>0</rtp_audio_rtcp_octet_count>
+  </variables>
+  <app_log>
+    <application app_name="set" app_data="call_timeout=10" app_stamp="1789286991478243"></application>
+    <application app_name="set" app_data="sip-force-contact=NDLB-connectile-dysfunction" app_stamp="1789286991478928"></application>
+    <application app_name="set" app_data="cdr_account_id=8004" app_stamp="1789286991479354"></application>
+    <application app_name="set" app_data="cdr_caller_in=80000001" app_stamp="1789286991479839"></application>
+    <application app_name="set" app_data="cdr_callee_in=ccccc" app_stamp="1789286991480351"></application>
+    <application app_name="set" app_data="cdr_caller_mid=80000001" app_stamp="1789286991480867"></application>
+    <application app_name="set" app_data="cdr_callee_mid=ccccc" app_stamp="1789286991481374"></application>
+    <application app_name="set" app_data="cdr_gateway_id=7" app_stamp="1789286991481880"></application>
+    <application app_name="set" app_data="cdr_carrier_id=4" app_stamp="1789286991482427"></application>
+    <application app_name="set" app_data="cdr_callee_out=ccccc" app_stamp="1789286991482808"></application>
+    <application app_name="set" app_data="cdr_caller_out=80000001" app_stamp="1789286991483185"></application>
+    <application app_name="set" app_data="effective_caller_id_number=80000001" app_stamp="1789286991483524"></application>
+    <application app_name="set" app_data="caller_id_number=80000001" app_stamp="1789286991483875"></application>
+    <application app_name="set" app_data="cdr_caller_type=phone" app_stamp="1789286991484236"></application>
+    <application app_name="set" app_data="cdr_dst_ip=sipp-reg" app_stamp="1789286991484576"></application>
+    <application app_name="set" app_data="cdr_dst_port=5060" app_stamp="1789286991484939"></application>
+    <application app_name="set" app_data="cdr_switch_count=0" app_stamp="1789286991485372"></application>
+    <application app_name="set" app_data="cdr_bill_unit=60" app_stamp="1789286991485753"></application>
+    <application app_name="set" app_data="cdr_switch_detail=;7:ccccc:0:1:WIN" app_stamp="1789286991486112"></application>
+    <application app_name="set" app_data="hangup_after_bridge=true" app_stamp="1789286991486492"></application>
+    <application app_name="set" app_data="rec_file=/recordings/2a5f89f1b0f0ce74/0fad61b6-a704-4292-890a-0f2e43581721.wav" app_stamp="1789286991486940"></application>
+    <application app_name="record_session" app_data="/recordings/2a5f89f1b0f0ce74/0fad61b6-a704-4292-890a-0f2e43581721.wav" app_stamp="1789286991496933"></application>
+    <application app_name="bridge" app_data="sofia/gateway/testgateway/ccccc" app_stamp="1789286991512589"></application>
+  </app_log>
+  <callflow dialplan="XML" unique-id="1041fab4-638f-4b1f-b1a1-5052dce5ff3e" profile_index="1">
+    <extension name="gw_outbound_route" number="ccccc">
+      <application app_name="set" app_data="call_timeout=10"></application>
+      <application app_name="set" app_data="sip-force-contact=NDLB-connectile-dysfunction"></application>
+      <application app_name="set" app_data="cdr_account_id=8004"></application>
+      <application app_name="set" app_data="cdr_caller_in=80000001"></application>
+      <application app_name="set" app_data="cdr_callee_in=ccccc"></application>
+      <application app_name="set" app_data="cdr_caller_mid=80000001"></application>
+      <application app_name="set" app_data="cdr_callee_mid=ccccc"></application>
+      <application app_name="set" app_data="cdr_gateway_id=7"></application>
+      <application app_name="set" app_data="cdr_carrier_id=4"></application>
+      <application app_name="set" app_data="cdr_callee_out=ccccc"></application>
+      <application app_name="set" app_data="cdr_caller_out=80000001"></application>
+      <application app_name="set" app_data="effective_caller_id_number=80000001"></application>
+      <application app_name="set" app_data="caller_id_number=80000001"></application>
+      <application app_name="set" app_data="cdr_caller_type=phone"></application>
+      <application app_name="set" app_data="cdr_dst_ip=sipp-reg"></application>
+      <application app_name="set" app_data="cdr_dst_port=5060"></application>
+      <application app_name="set" app_data="cdr_switch_count=0"></application>
+      <application app_name="set" app_data="cdr_bill_unit=60"></application>
+      <application app_name="set" app_data="cdr_switch_detail=;7:ccccc:0:1:WIN"></application>
+      <application app_name="set" app_data="hangup_after_bridge=true"></application>
+      <application app_name="set" app_data="rec_file=/recordings/2a5f89f1b0f0ce74/${uuid}.wav"></application>
+      <application app_name="record_session" app_data="${rec_file}"></application>
+      <application app_name="bridge" app_data="sofia/gateway/testgateway/ccccc"></application>
+    </extension>
+    <caller_profile>
+      <username>80000001</username>
+      <dialplan>XML</dialplan>
+      <caller_id_name>80000001</caller_id_name>
+      <caller_id_number>80000001</caller_id_number>
+      <callee_id_name>Outbound Call</callee_id_name>
+      <callee_id_number>ccccc</callee_id_number>
+      <ani>80000001</ani>
+      <aniii></aniii>
+      <network_addr>192.0.2.1</network_addr>
+      <rdnis></rdnis>
+      <destination_number>ccccc</destination_number>
+      <uuid>0fad61b6-a704-4292-890a-0f2e43581721</uuid>
+      <source>mod_sofia</source>
+      <context>default</context>
+      <chan_name>sofia/internal/80000001@192.0.2.10:5060</chan_name>
+      <origination>
+        <origination_caller_profile>
+          <username>80000001</username>
+          <dialplan>XML</dialplan>
+          <caller_id_name>80000001</caller_id_name>
+          <caller_id_number>80000001</caller_id_number>
+          <callee_id_name>Outbound Call</callee_id_name>
+          <callee_id_number>ccccc</callee_id_number>
+          <ani>80000001</ani>
+          <aniii></aniii>
+          <network_addr>192.0.2.1</network_addr>
+          <rdnis></rdnis>
+          <destination_number>ccccc</destination_number>
+          <uuid>8be2e963-7465-4c80-a302-0c0a9878a410</uuid>
+          <source>mod_sofia</source>
+          <context>default</context>
+          <chan_name>sofia/external/ccccc</chan_name>
+        </origination_caller_profile>
+      </origination>
+      <originatee>
+        <originatee_caller_profile>
+          <username>80000001</username>
+          <dialplan>XML</dialplan>
+          <caller_id_name>80000001</caller_id_name>
+          <caller_id_number>80000001</caller_id_number>
+          <callee_id_name>Outbound Call</callee_id_name>
+          <callee_id_number>ccccc</callee_id_number>
+          <ani>80000001</ani>
+          <aniii></aniii>
+          <network_addr>172.18.0.7</network_addr>
+          <rdnis></rdnis>
+          <destination_number>ccccc</destination_number>
+          <uuid>8be2e963-7465-4c80-a302-0c0a9878a410</uuid>
+          <source>mod_sofia</source>
+          <context>default</context>
+          <chan_name>sofia/external/ccccc</chan_name>
+        </originatee_caller_profile>
+      </originatee>
+    </caller_profile>
+    <times>
+      <created_time>1789286991327858</created_time>
+      <profile_created_time>1789286991327858</profile_created_time>
+      <progress_time>0</progress_time>
+      <progress_media_time>1789286991487845</progress_media_time>
+      <answered_time>1789286991527857</answered_time>
+      <bridged_time>1789286991527857</bridged_time>
+      <last_hold_time>0</last_hold_time>
+      <hold_accum_time>0</hold_accum_time>
+      <hangup_time>1789287012547881</hangup_time>
+      <resurrect_time>0</resurrect_time>
+      <transfer_time>0</transfer_time>
+    </times>
+  </callflow>
+</cdr>
