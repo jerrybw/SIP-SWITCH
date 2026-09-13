@@ -499,8 +499,22 @@ role 列无实际意义。用户管理是角色体系成立的前提，纳入 M3
   viewer 只读 / ROLE_NAMES 契约 / ENFORCE_ROLE 契约）。
 - `node --check` admin.js 通过。测试对 py3.10+pydantic2.13 的 Session 注解
   ForwardRef 求值问题做了规避（直调端点函数；容器 py3.12 不受影响）。
-- **E2E 待补**：zstack 独立栈 build context 指向 zcode clone 的变体由 root 侧
-  准备中；就绪后补真实容器验证（登录/种子/角色 403 矩阵/用户 CRUD/oplog 落库）。
+- **E2E 已补（2026-09-13，zdev 验证栈：build context 指向 zcode clone，gw 9100）**：
+  - 种子自愈闭环：dev-seed 的 DROP TABLE 清掉种子行 → 空表 bootstrap 回落可登录
+    （config 直登路径✓）→ **dev-restart 后 migrate 空表检测自动重新种子**，登录后
+    `/api/me` 返回 `role=super` ✓（日志：`[migrate] sys_user 空表 -> 已按 config 种子 super`）
+  - 用户 CRUD：创建 admin/viewer（201）/口令过短 400/用户名重复 400/编辑停启用/
+    重置密码后**新密码重登 200**/删除 200 ✓
+  - 守卫：唯一 super 自降级/自停用/自删除均 400；双 super 场景停用他人 200、
+    **已停用的 super 可降级**（本轮口径修正的行为验证）200 ✓
+  - 角色矩阵：admin 打 `/api/users` 403（`role=admin`）/ viewer 列表 403（super-only）+
+    业务写 `POST /api/gateways` 403（write_guard）+ 改自己密码 200（豁免路径）✓
+  - CSRF/鉴权：裸 curl 无 Origin 写 403、未登录写 401（不被 write_guard 吞成 403）✓
+  - oplog：`/api/operation-logs` 404（未挂载的实证——待维护者 app.py +1 行）；
+    中间件无写失败日志（fire-and-forget 正常）
+  - 基线回归：`/api/nodes`、`/api/gateways`、`/api/cdr`、`/api/cdr/export`（CSV 表头
+    正确）、`/admin` 页面（`?v=20260913a` 生效、新 JS 含 M3 代码）全 200 ✓
+  - 栈已 dev-down（卷保留；种子/用户数据在卷内，下次 dev-up 直接可用）
 
 ### 已知卡点（需维护者拍板）
 1. `app.py` +1 行：`app.include_router(oplog_router)`（crud 兜底前）——用户管理
