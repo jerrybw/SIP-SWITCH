@@ -724,3 +724,43 @@ docker exec <gateway> python /app/tools/cdr_health.py --minutes 60
 **新坑**：PITFALLS **#74**（MySQL 8 行别名 upsert 要求 `new.<col>` 的列出现在 INSERT 列清单，
 否则 `1054` → `_upsert_cdr_dict(ignore_existing=False)` 的 vals **必须全列宽**）。
 
+
+## 2026-09-13 P2 · 并发预检收口（zcode 会话，评审通过后实施，代码待合入）
+
+**设计稿**：`reviews/设计稿-P2-并发预检实时查询.md` v1.1（评审 `reviews/评审-P2-by-workbuddy.md`，Q1 用户拍板：config 顶层 + 默认 0）。**实施基线 `16b6ca7`**。
+
+**两段式回填口径（评审 Q5 拍板，勿笼统写"遗留② 完成"）**：
+
+1. **遗留②（预检数据面改 Redis 实时）**：✅ **由 P2-a（D7，2026-09-12）超前完成**——
+   dialplan 预检热路径 = `concurrency.snapshot()`（Redis MGET 实时快照，app.py:455
+   `_conc_snapshot_or_fail`）+ `reserve_leg` Lua 原子闸门（check-limit+INCR+凭证+TTL
+   一次原子，app.py:469 `_conc_reserve_candidates`）；快照仅作 global/ap 预检与 P2-c
+   重排偏好，无 TOCTOU。本段在 P2-a 合入时即已闭合，此处补记定论。
+2. **全局维度闸门**：⚠️→✅ **G1 死配置修复**（本次交付）：`concurrent_limit_global`
+   此前在 config.example.yaml / core/config.py / deploy.sh **三处无入口**（恒 0，
+   全局限制形同虚设——PITFALLS #53 同型，本稿 §2-G1）。本次两份 config 模板补顶层
+   键（**0=不限制，非"禁止"**；容量属性改后重启生效，**不支持热更**——运行中收紧
+   是语义死结，防后人顺手加热配）+ `core/config.py::_apply_defaults` 默认 0 与 int
+   钳位 + 环境上手文档行。**global=2 的 503 闸门 E2E（V1）**：zdev 配置挂载 root:600
+   zcode 不可写，turnkey 清单已交 WorkBuddy 执行（设计稿 §7.1），其回传为准。
+
+**其余交付**：
+- **G2/Q3**：`/api/stats/concurrency` 来源标记 **patch 文案**已交 WorkBuddy app.py 批次
+  （设计稿 §4.2，锚点 16b6ca7:865）；**配套发现存量 bug（patch ③）**：该路由定义在
+  `include_router(crud_router)`（app.py:350）**之后**，被 crud 兜底 `/{entity}/{item_id}`
+  吞成 **422**（E2E 实测 `int_parsing item_id='concurrency'`，顶栏链接自加入即坏，
+  PITFALLS #34 违例）——修法=函数段上移至 crud include 之前，随 source 字段同批。
+- **前端徽标（Q3 前提"运维看得到"）**：顶栏「并发快照」`id=conc-link`，`source=shadow`
+  显示 ⚠+悬浮提示；**字段缺失/请求失败静默降级**（老后端可用）。`?v=` 按拍板统一
+  20260913b（合入方 bump）。
+- **G3/遗留③（欠计方向）**：✅ 语义关闭（评审 Q3 拍板）——Redis 侧 reconcile 已覆盖
+  自愈（断连重连 30s 内泄漏释放+校准）；影子漂移仅剩 fallback/展示语义，G2 打标后无
+  运维依赖，**不引入影子校准**。`backend=local` 注释显式降格：仅限开发/无 Redis 部署。
+- **G5 验收**：`tests/test_p2_global_limit.py` 7 例（缺省=0/0 语义/正数/负钳位/字符串
+  强转/垃圾回落/**顶层键防嵌套**）；**V2 零变化** zdev 实测（新基线 16b6ca7：网关启动/
+  登录/种子自愈/Redis 预检全正常）。压测预演（M4 前置）**不排期但必须打点**：snapshot
+  与 reserve 各自 RTT 占比（Q4 拍板）。
+
+**分支**：`feature/zcode/p2-conc-precheck-realtime`（88affa6，基于 16b6ca7）。
+测试：precheck ✓；全量 107 passed / 37 skipped / 0 failed（本地无 MySQL，route/rules/
+cdr_preserve_cols 三文件按既有口径 skip/ignore；容器真库全量以合入方复跑为准）。
