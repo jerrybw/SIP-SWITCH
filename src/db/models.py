@@ -286,7 +286,7 @@ class Cdr(Base):
     hangup_cause = mapped_column(String(32))
     sip_code = mapped_column(Integer)
     sip_invite_failure_status = mapped_column(String(16))
-    reject_reason = mapped_column(String(64))
+    reject_reason = mapped_column(String(255))
     # 挂断方向(2026-09-03 新增)：0=服务器 1=主叫 2=被叫 3=其他（esl_client 按呼叫阶段+信令判定）
     hangup_direction = mapped_column(SmallInteger, default=0)
     switch_count = mapped_column(Integer, default=0)

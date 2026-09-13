@@ -57,7 +57,10 @@ def _int_or(v, default, lo, hi):
 def _gateway_xml(gw):
     """单条落地网关 XML（与旧 fs_provision.bgw 完全一致，仅去 <include> 包裹）。"""
     p = "{}:{}".format(gw.ip, gw.port or 5060)
-    st = int(getattr(gw, "status", 1) or 1)
+    # 不可写成 `or 1`：status=0（停用）时 `0 or 1` 求值为 1，会让停用的落地网关
+    # 照样下发 sofia.conf（FS 照样注册）。仅在字段缺失(None) 时回落启用。
+    _st = getattr(gw, "status", None)
+    st = 1 if _st is None else int(_st)
     reg = "false" if st != 1 else ("true" if int(getattr(gw, "auth_type", 0) or 0) == 1 else "false")
     u = getattr(gw, "username", None) or gw.name
     w = getattr(gw, "password", None) or ""

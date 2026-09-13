@@ -166,6 +166,7 @@
 | 5 | 生产策略：继续"等 dev 单机+多机成熟后按成熟方案重部署" | 当前决策=等重部署 |
 | 6 | `concurrent_limit_global` 无配置入口（全局并发限制恒 0） | 全局并发限制实际不生效，需补配置入口 |
 | 7 | 多副本 CDR 幂等（选主 vs 幂等键） | 网关多副本部署时 CDR 去重 / 防重复计费 |
+| 8 | **前端 gateway 状态跨账号不一致**（admin 停用后换账号仍见"启用"，F5 后同步） | 疑前端缓存/乐观更新，**待定位修复**（2026-09-13 记录，未动代码） |
 
 ---
 
@@ -530,3 +531,57 @@ role 列无实际意义。用户管理是角色体系成立的前提，纳入 M3
      action 精确过滤 2 条 / operator 模糊 2 条；自动埋点确认落库（上轮 E2E
      的 35 次写操作全在 operation_log：admin delete /api/users/5 等）。
 2. 本分支 commit 待 push（用户统一推送）。
+
+## 2026-09-13 修复记录（二：P2-a 回归两修 + 前端缺陷记录，dev 验证通过，待提交）
+
+**背景**：用户拨打测试暴露三个问题。①② 已修复并验证；③ 仅记录，未动代码。
+
+### ① fix: CDR 整行落库失败（`reject_reason` 超长）—— 话单 UNKNOWN / 缺字段的真因
+
+**现象**：话单显示 `hangup_cause=UNKNOWN`、`answer_time`/`talk_duration` 为 NULL、`cost=0`。
+
+**根因**：`cdr.reject_reason` 为 `varchar(64)`，而 P2-a 的 `_conc_detail()`（`api/app.py:417`）
+产出的并发详情串（`busy_limit_gw;gw=7;gw_conc=1;gw_limit=1;g_conc=0;g_limit=0;ap=6;ap_conc=0`）
+**79 字符 > 64** → MySQL 严格模式下 `ON DUPLICATE KEY UPDATE` **整行失败**
+（网关日志累计 **90 次** `Data too long for column 'reject_reason'`）→ 落 spool 重试同样失败
+→ 最终只剩 reconcile 回填的骨架（`hangup_cause=UNKNOWN`）。
+注：失败那次的 ESL 其实算出了正确值（`NETWORK_OUT_OF_ORDER`），只是写不进库。
+
+**修复**（三处）：
+- `src/db/models.py`：`reject_reason` `String(64)` → `String(255)`
+- `src/db/migrate.py` 新增 `ensure_cdr_reject_reason_len()`（幂等 ALTER，已挂到 `db/session.py` 启动链）
+- `src/esl_client.py::_upsert_cdr_dict`：**新增通用列宽截断** —— 落库前按 models 定义的列宽截断字符串，
+  防止同类问题再次导致「整行」失败（截断只牺牲尾部信息，保住整行）
+
+**验证（dev）**：migrate 打印 `cdr.reject_reason 64 -> 255`；370 字符输入落库成功（实际存 255）；
+容器真 MySQL 全量回归 **130 passed**（与修复前基线一致，无回归）。
+
+### ② fix: 停用的落地网关照样下发 / 照样注册（`or 1` 陷阱）
+
+**现象**：Web 端停用 gateway 后，FS 仍注册（`sofia status` 显示 `REGED`）。
+
+**根因**：`src/fs_sofia_config.py:60` 写作 `st = int(getattr(gw, "status", 1) or 1)` ——
+`status=0`（停用）时 **`0 or 1` 求值为 1**，停用网关被当成启用下发（`register="true"`），FS 于是照常注册。
+作者本意是"字段缺失时默认启用"，但误伤了 `status=0` 这个**合法值**。
+（对照 `src/heartbeat.py:91` 用的是 `Gateway.status == 1`，此前全站口径不统一。）
+
+**修复**：仅当字段确为 `None` 时回落启用：
+`_st = getattr(gw, "status", None)` / `st = 1 if _st is None else int(_st)`
+
+**验证（dev）**：`status=0 → <param name="register" value="false"/>`；`status=1 → "true"`。
+
+### ③ 记录（**待修复，未动代码**）：前端 gateway 状态跨账号不一致
+
+- **现象**：admin 停用某网关后页面显示"已停用"；换 admin_admin 登录却看到"启用"；F5 刷新后同步
+- **已核实**：后端"停用"操作当时是**成功**的（`PUT /api/gateways/9 → 200` + `killgw +OK` + `rescan Success`）；
+  DB `status` 后被改回 1 系**用户后续手动修改**（非程序回写，已确认）
+- **结论**：前端存在**缓存 / 乐观更新**问题（未定位到具体代码）→ 见 §10 第 8 项
+
+### 附：本次同时引入的 P1 前置改动（FS 侧，另提交）
+
+- `deploy/fs-config/autoload_configs/modules.conf.xml`：启用 `mod_xml_cdr`
+- `deploy/fs-config/autoload_configs/xml_cdr.conf.xml`（新）：`url=__GATEWAY_URL__/fs/cdr`、
+  `log-dir` + `log-http-and-disk=true`、`encode=false`、`log-b-leg=false`
+- `docker-compose.yml`：FS 段加卷 `./data/xml_cdr:/usr/local/freeswitch/log/xml_cdr`
+- **实证**：`module_exists mod_xml_cdr` 由 `false` → `true`；抓 fixture 零网络依赖（`log-dir` 即留档）
+

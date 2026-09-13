@@ -1062,6 +1062,16 @@ def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False, db=None):
     for _k, _d in _nn_defaults.items():
         if vals.get(_k) is None:
             vals[_k] = _d
+    # 防御：按 models 定义的列宽截断字符串。MySQL 严格模式下超长抛 DataError(1406)，
+    # 会让「整行」落库失败（reject_reason 曾因 79 > varchar(64) 使全部 CDR 写不进库，
+    # 只剩 reconcile 回填的骨架）。截断只牺牲尾部信息，保住整行。
+    _typed = {c.name: c for c in Cdr.__table__.columns}
+    for _k, _v in list(vals.items()):
+        if isinstance(_v, str):
+            _c = _typed.get(_k)
+            _ln = getattr(getattr(_c, "type", None), "length", None)
+            if _ln and len(_v) > _ln:
+                vals[_k] = _v[:_ln]
     # 统一收口（所有落库路径：_save_cdr / pre_insert_cdr / spool 重灌 都汇聚于此）：
     # 对齐到该 uuid 已落行的 start_time。cdr 是分区表，唯一键 (uuid, start_time) 在
     # start_time 取不同值（事件时间 vs utcnow）或为 NULL 时均不判冲突，导致同一通话落多行。

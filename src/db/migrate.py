@@ -326,6 +326,33 @@ def ensure_gateway_register_columns(engine) -> None:
         ])
 
 
+def ensure_cdr_reject_reason_len(engine) -> None:
+    """cdr.reject_reason 加宽 64 -> 255（幂等）。
+
+    并发闸门的拒绝详情串（_conc_detail: busy_limit_gw;gw=..;gw_conc=..;g_conc=..;
+    g_limit=..;ap=..;ap_conc=..）实测 79 字符 > 原 varchar(64)，MySQL 严格模式下
+    整行 upsert 失败 -> CDR 落不进库，只剩 reconcile 回填骨架（hangup_cause=UNKNOWN）。
+    """
+    if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        try:
+            cur = conn.execute(text(
+                "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = 'cdr' "
+                "AND column_name = 'reject_reason'"
+            )).scalar()
+            if cur is not None and int(cur) >= 255:
+                return
+            conn.execute(text(
+                "ALTER TABLE cdr MODIFY COLUMN reject_reason VARCHAR(255) DEFAULT NULL"
+            ))
+            conn.commit()
+            print("[migrate] cdr.reject_reason %s -> 255" % cur)
+        except Exception as e:
+            print("[migrate] WARN cdr.reject_reason alter failed: %s" % e)
+
+
 def ensure_billing_columns(engine) -> None:
     """T-计费：补齐费率列(account/access_point/sip_phone.rate)与消费列(cdr.cost/rate_used)。幂等。"""
     if getattr(engine, "dialect", None) is None or engine.dialect.name != "mysql":
