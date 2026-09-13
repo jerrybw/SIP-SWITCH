@@ -957,6 +957,10 @@ async def fs_cdr_api(request: Request):
             mode=get_setting("cdr_xml_mode") or cdr_truth.DEFAULT_MODE,
             **cdr_truth_wiring)
     except ValueError as e:
+        # 400 原因原本只回给 FS（随即丢弃），网关日志无痕 → 排障只能靠猜；
+        # 补一行观测（含 CT 与 body 头部，PITFALLS #75 直接定位编码形态）。
+        print("[fs_cdr] 400: %s (ctype=%s, body[:80]=%r)" % (
+            e, request.headers.get("content-type", ""), bytes(body)[:80]), flush=True)
         return JSONResponse({"detail": str(e)}, status_code=400)
     except Exception as e:  # noqa: BLE001 —— 回调失败不能让 FS 侧堆积 err-log
         print("[fs_cdr] apply failed: %s" % e, flush=True)

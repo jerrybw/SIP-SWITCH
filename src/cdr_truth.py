@@ -635,11 +635,18 @@ def apply_xml_cdr(xml_text, *, row_loader, upsert_fn, enqueue_fn, full_cols=None
 def extract_cdr_xml(body, content_type=""):
     """从 `/fs/cdr` 请求体取出 XML 文本（纯函数）。
 
-    mod_xml_cdr 以 `application/x-www-form-urlencoded` 提交，XML 放在某个字段里；
-    **字段名随 FS 版本/配置而异**（设计稿 §5.4 列为待实测项），故这里三者都兼容：
-      ① 表单字段 `cdr`（预期）　② 表单字段 `xml` / `cdr_xml` / `data`
-      ③ 整个 body 就是 XML（`<` 开头，未编码）
+    mod_xml_cdr 的提交形态随 `encode` 配置而异，这里全部兼容：
+      ① 整个 body 就是 XML（`<` 开头，未编码）
+      ② `cdr=` + **原始 XML**（`encode=false` / ENCODING_NONE，本设计选定值；
+         Content-Type = `application/x-www-form-plaintext`，**零 URL 编码**）
+      ③ `cdr=` + 整体 url_encode(XML)（`encode=true` / ENCODING_DEFAULT）
+      ④ 真表单字段族 `cdr` / `xml` / `cdr_xml` / `data`
     取不到时返回空串（端点回 400）。
+
+    ⚠️ PITFALLS #75：②与③同为 `cdr=` 前缀但编码语义完全不同——②**绝不能**
+    交给 parse_qs，XML 内裸 `&`（`&amp;` 等实体）与 `=` 会把值在第一个 `&`
+    处切碎 → XML 解析失败 → 端点 400（zdev 真呼叫 11/11 复现）。
+    落盘 fixture 可解析 ≠ live POST 可解析，验收以真实 HTTP 形态为准。
     """
     if isinstance(body, (bytes, bytearray)):
         raw = bytes(body).decode("utf-8", "replace")
@@ -650,6 +657,17 @@ def extract_cdr_xml(body, content_type=""):
         return ""
     if raw.startswith("<"):
         return raw
+    # ---- `cdr=` 前缀三形态在此统一收敛（PITFALLS #75）----
+    if raw.startswith("cdr="):
+        cand = raw[4:].strip()
+        # ② ENCODING_NONE（encode=false）：cdr= + 原始 XML，零 URL 编码。
+        #    必须在此直接返回，落到下面的 parse_qs 会被裸 &/= 切碎。
+        if cand.startswith("<"):
+            return cand
+        # ③ ENCODING_DEFAULT（encode=true）：cdr= + 整体 url_encode(XML)
+        cand_u = urllib.parse.unquote_plus(cand).strip()
+        if cand_u.startswith("<"):
+            return cand_u
     ctype = (content_type or "").lower()
     if "form-urlencoded" in ctype or "=" in raw:
         try:
