@@ -114,6 +114,7 @@
 | P2-a | 状态外移 Redis + 原子预留（D7） | ✅ **完成（2026-09-12）** | `src/concurrency.py`（Lua 预留/释放/转移/兜底 + ensure b 凭证升级补 gw/ap 档**且升级过 limit 闸门** + 凭证 TTL + reconcile Redis 对账层）；`app.py` `_conc_snapshot_or_fail`（fail-close 预检）+ `_conc_reserve_candidates`（逐候选 Lua 原子预留，gw 满自动试下一候选）；`esl_client.py` 挂钩 ensure(CHANNEL_CREATE)/transfer(cdr_gateway_id)/release(HANGUP)；`config.example.yaml` 补 concurrency 段；单测 `tests/test_concurrency_p2a.py` 20 条全绿。**E2E 实测**：9 通并发 gw7 计数 9/9（修复前竞态漏计=0，global=9/gw7=0）；limit=1 闸门 1 过 8 拒（修复后新增升级分支 limit 检查）；全程无 `conc:cnt:gw:0` 幽灵键、挂断归零；fail-close：停 Redis→503 busy_limit_redis，恢复→reconcile 自愈 |
 | P2-b | fail-close / spool 补偿 / 逃生开关 | ⚠️ 基本完成 | ✅ 并发预检超限 503、✅ spool + reaper、✅ fail-open 逃生开关已实现（`concurrency.fail_open()`，D5；**2026-09-13 拍板：默认维持 fail_open=false（fail-close）**——Redis 形态=云托管（高可用为前提），拒呼优于超发）；E2E 实测停 Redis→503 busy_limit_redis、恢复→reconcile 自愈 |
 | P2-c | 并发作为**选路因子**（D8 v1.3） | ✅ **完成（2026-09-12，随 P2-a）** | 打标 ✅ / 选路重排 ✅ / 原子预留 ✅（Lua 最终闸门）；详见 §7 P2-a 行证据 |
+| P2-收口 | G1-G5 缺口修补（设计稿-P2 v1.1，2026-09-13 交付） | ✅ **完成（2026-09-13）** | G1 `concurrent_limit_global` 配置入口（`c2ad669`，config 两份模板顶层键 + `core/config.py` 钳位兜底，0=不限，容量属性不热更，§10 #6 闭合）；G2 `/api/stats/concurrency` 加 `source` 字段（`e8779b0`，redis=真源/shadow=影子）+ **#34 存量 bug 修复**（路由原在 crud_router 后被兜底匹配实测 422，整段上移；顶栏「并发快照」自加入以来即坏，现已通）；G3 影子面语义文档化（local 显式降格仅限开发）；G4 `_conc_reserve_candidates` not-uuid 防御 WARNING（`e8779b0`）；G5 单测 `test_p2_global_limit.py` 7 例 + `test_p2_stats_source.py` 4 例；**容器全量 173 passed**；前端徽标+3 处缺陷修复（`ac85912`，fmtBJ 时区/users 分页/滚动容器）。V1（global=2 闸门 sipp E2E）待下次呼叫验证批次执行
 
 > ⚠️ **时序铁律（不得颠倒）：P2-a → P2-b → P2-c**
 > b/c 都依赖"准入时即时准确"的并发值，而现有计数是**事件驱动**（仅 A 腿、需等 `CHANNEL_CREATE`）。
@@ -164,7 +165,7 @@
 | 3 | M4 压测是否准备云上规格（FS 16C32G + 同地域压测机） | M4 能否启动 |
 | 4 | ~~P2-c 打标字段（`gw_overflowed` + 原始首选 `gw_id`）落新列 or 扩展字段~~ **已拍板 2026-09-10：走扩展字段，复用 `switch_detail`**（不加列） | ✅ 已落地 |
 | 5 | 生产策略：继续"等 dev 单机+多机成熟后按成熟方案重部署" | 当前决策=等重部署 |
-| 6 | `concurrent_limit_global` 无配置入口（全局并发限制恒 0） | 全局并发限制实际不生效，需补配置入口 |
+| 6 | ~~`concurrent_limit_global` 无配置入口（全局并发限制恒 0）~~ **已解决 2026-09-13**：config 顶层键 + `_apply_defaults` 兜底（`c2ad669`），0=不限，容量属性不热更 | ✅ 已落地（P2-收口 G1） |
 | 7 | 多副本 CDR 幂等（选主 vs 幂等键） | 网关多副本部署时 CDR 去重 / 防重复计费 |
 | 8 | **前端 gateway 状态跨账号不一致**（admin 停用后换账号仍见"启用"，F5 后同步） | 疑前端缓存/乐观更新，**待定位修复**（2026-09-13 记录，未动代码） |
 
