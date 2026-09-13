@@ -741,8 +741,11 @@ docker exec <gateway> python /app/tools/cdr_health.py --minutes 60
    全局限制形同虚设——PITFALLS #53 同型，本稿 §2-G1）。本次两份 config 模板补顶层
    键（**0=不限制，非"禁止"**；容量属性改后重启生效，**不支持热更**——运行中收紧
    是语义死结，防后人顺手加热配）+ `core/config.py::_apply_defaults` 默认 0 与 int
-   钳位 + 环境上手文档行。**global=2 的 503 闸门 E2E（V1）**：zdev 配置挂载 root:600
-   zcode 不可写，turnkey 清单已交 WorkBuddy 执行（设计稿 §7.1），其回传为准。
+   钳位 + 环境上手文档行。**global=2 的 503 闸门 E2E（V1）**：✅ **已验收（WorkBuddy 按设计稿 §7.1 turnkey 清单
+   执行，2026-09-13 四判据全过）**：4a 网关日志命中 `[conc-limit] global 2>=2
+   busy_limit_global`；4b CDR `sip_gateway_reject_reason=busy_limit_global;gw=8;...;
+   g_conc=2;g_limit=2`（机器可读串完整）；4c 计数 2 即拒未超限；4d 恢复配置重启后
+   3/3 全通（V2 零变化复证）。配置已还原，zdev 已 down。
 
 **其余交付**：
 - **G2/Q3**：`/api/stats/concurrency` 来源标记 **patch 文案**已交 WorkBuddy app.py 批次
