@@ -397,7 +397,8 @@
 活跃腿不误伤）；回归 pytest 15 passed；真机部署后 dialplan 恢复正常出局（bridge testgateway，
 不再 busy_limit 503）。
 
-**遗留**：① 金额兜底待 mod_xml_cdr 真源（P1）；② 并发预检改实时查询（P2，高并发前做）；
+**遗留**：① **✅ 已闭合（2026-09-13，P1 · CDR 真源）** —— 见下方
+「2026-09-13 P1 · CDR 真源（mod_xml_cdr）交付」；② 并发预检改实时查询（P2，高并发前做）；
 ③ 对账「欠计」方向（ESL 断连期间新建的呼叫计数缺失）仅观测不修。
 
 ## 2026-09-11 工程约定：app.py 冻结 + M3 扩展点拆分（多人并行防冲突）
@@ -662,4 +663,63 @@ docker exec <gateway> python /app/tools/cdr_health.py --minutes 60
 `_event_worker_loop` 的异常出口改为 `_on_esl_event_error()`：**首次打完整堆栈** +
 落一条 `operation_log`（action=`esl_event_error`，管理端可见、同 action 去重），
 之后按累计计数打点。**「静默失败」是本次晚发现的根本原因**，此改动使其可被观测。
+
+## 2026-09-13 P1 · CDR 真源（mod_xml_cdr）交付
+
+**闭合**：§7「#75 修复记录」遗留 **① 金额兜底**（对账自愈当时明确"金额不在对账内重算"，
+因为对账拿到的时长是估算值）。设计稿：`设计稿-P1-CDR真源.md` v1.1（交叉评审方 zcode）。
+
+**口径（最容易搞错的一点，两段式）**：
+1. **XML CDR 不提供金额** —— FS 不知道我们的费率，它只给**权威时长**（`billsec`/`duration`）；
+2. 所以「金额兜底」= **用 XML 的权威时长 + 本系统费率链重算**（`_compute_billing`），
+   **不是**从 XML 里读一个金额出来。
+3. 默认 `reconcile_only`：**只补缺失、不覆盖、不重算已有有效金额** → 正常呼叫**零变化**。
+
+**FS 侧**（`deploy/fs-config/`）：取消 `modules.conf.xml` 的 `mod_xml_cdr` 注释；
+新增 `autoload_configs/xml_cdr.conf.xml`（`url=__GATEWAY_URL__/fs/cdr`、凭据复用
+`__XMLCURL_*__`、`encode=false`、`log-http-and-disk=true`）；compose 加卷
+`./data/xml_cdr:/usr/local/freeswitch/log/xml_cdr`。
+`mod_xml_cdr.so` **本就在镜像里**（`/usr/local/freeswitch/lib/freeswitch/mod/`），无需重编译。
+
+**网关侧**：`POST /fs/cdr`（Basic 鉴权走 `FS_BASIC_PATHS`，fail-closed；>256KB → 413；
+`cdr_xml_enabled=0` → 503）。新增 `src/cdr_truth.py`（`parse_xml_cdr` / `build_patch` /
+`apply_xml_cdr` / `extract_cdr_xml` / `make_esl_wiring`，纯函数优先、DB 能力注入）。
+落库经 `_enqueue_cdr_job` 进 **cdr-writer 单线程队列**（与 ESL 路径串行化，
+把并发写窗口消掉）；`_upsert_cdr_dict` 增 `preserve_cols`，**降级腿（无 answer_time）
+保护计费组列不被清零**（R1，spool 重灌同样带标记）。
+
+**实测要点（真机 fixture，2026-09-13）**：
+- `mod_xml_cdr` 输出的**变量值全部 URL-encoded**（`%20`/`%3A`/`%3B`/`%40`）
+  → 取值必须 `unquote`（否则 `start_stamp`/`cdr_switch_detail`/`sip_*` 全是转义串）。
+- 业务字段全在 `<variables>` 下；业务维度直接用 `cdr_account_id` / `cdr_access_point_id` /
+  `cdr_caller_mid` 等，**不按号码反查**；`cdr_access_point_id` 仅「经接入点」呼叫才有。
+- 时间戳取 `*_epoch`（秒）为主、`*_stamp` 回落；`answer_epoch=0` = 未接通。
+- FS conf 实际路径是 `/usr/local/freeswitch/etc/freeswitch`（不是常见的 `conf/`）。
+- `fs_cli` 必须带 ESL 密码（`fs_cli -p "$ESL_PASSWORD"`），否则只看到 `Error Connecting`。
+
+**验收矩阵（dev 公用栈，13 份真机 XML 全量重放到 `/fs/cdr`）**：
+
+| 用例 | 结果 |
+|---|---|
+| A1 正常呼叫零变化 | **6 条**：`cost`/`talk` 一字未改（含 `billsec` 与 ESL 估值不同的场景） |
+| A2 ESL 丢 HANGUP → XML 兜底 | **10 条**：`talk`/`bill`/`cost`/`answer_time`/`switch_detail`/`fs_node_uuid` 全补齐 |
+| A3 幂等（重复 POST 同一 uuid） | ✓ 前后一致，不双算 |
+| A4 未接通（`billsec=0`） | ✓ 不产生金额（仅接通计费口径不变） |
+| A5 无 Basic 凭据 | ✓ 401 |
+| A6 `cdr_xml_enabled=0` | ✓ 503；恢复后 200 |
+| A7 单测（纯函数全分支） | ✓ `tests/test_cdr_truth.py` 28 例 |
+| A8 全量回归 | ✓ 容器真 MySQL **161 passed**（0 failed） |
+| **附带**：`cdr_health` 反证 | 交付前「可疑（reconcile 回填）」8 条 → **交付后 0 条** |
+
+**已知限制 / 后续**（不阻塞闭合）：
+- `hangup_cause` 默认**不被 XML 覆盖**（`reconcile_only`）→ 骨架行的原因仍是 `UNKNOWN`；
+  若要 XML 优先，置 `cdr_xml_mode=authoritative`（默认不启用，效果未做 E2E）。
+- `hangup_direction` / `switch_detail`（非本系统经手时）为 NULL 属**预期**，非缺陷。
+- 多 FS 节点上报同一网关不在本设计范围（留 T-501）。
+- **与设计稿的一处偏离**：`cdr_xml_enabled` 实现为**默认启用**（原定默认 0）——
+  理由：默认 0 会让 P1 在真实部署里始终不生效（遗留①名义闭合、实际未闭）；
+  回退手段仍在（置 0 → 503，或注释 FS 模块）。已同步记入设计稿 §14。
+
+**新坑**：PITFALLS **#74**（MySQL 8 行别名 upsert 要求 `new.<col>` 的列出现在 INSERT 列清单，
+否则 `1054` → `_upsert_cdr_dict(ignore_existing=False)` 的 vals **必须全列宽**）。
 
