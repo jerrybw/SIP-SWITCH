@@ -19,7 +19,7 @@ log = logging.getLogger("api.fs_auth")
 _missing_warned = False
 
 # 走 Basic 共享凭据的 /fs/* 端点（app.py 只按此表分流，校验逻辑全在本模块）
-FS_BASIC_PATHS = ("/fs/dialplan", "/fs/directory", "/fs/config")
+FS_BASIC_PATHS = ("/fs/dialplan", "/fs/directory", "/fs/config", "/fs/cdr")
 
 
 def fs_basic_auth_ok(request) -> bool:

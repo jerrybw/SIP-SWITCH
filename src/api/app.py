@@ -38,6 +38,8 @@ from esl_client import pre_insert_cdr
 from route.service import select_outbound_gateway, resolve_access_point, resolve_access_points
 from esl_client import get_concurrency
 import concurrency  # P2-a：Redis 并发原子预留（D7）
+import cdr_truth  # P1：CDR 真源（mod_xml_cdr 上报的权威 XML CDR 兜底）
+from core.sys_setting import get_int_setting, get_setting
 from api.directory_xml import fs_directory
 from fs_sofia_config import build_config_response
 from alerting import push_webhook
@@ -84,7 +86,8 @@ async def _auth_guard(request, call_next):
         return Response("unauthorized", status_code=401,
                         media_type="text/plain; charset=utf-8",
                         headers={"WWW-Authenticate": "Basic"})
-    if (path in ("/fs/dialplan", "/fs/directory", "/fs/config", "/healthz", "/api/login", "/api/logout")
+    if (path in ("/fs/dialplan", "/fs/directory", "/fs/config", "/fs/cdr",
+                 "/healthz", "/api/login", "/api/logout")
             or path.startswith("/static/") or path == "/" or path == "/admin"):
         return await call_next(request)
     try:
@@ -913,6 +916,35 @@ def admin_page(request: Request):
 @app.get("/")
 def root():
     return RedirectResponse(url="/admin")
+
+
+# --- P1 · CDR 真源（mod_xml_cdr）：接收权威 XML CDR 做兜底 --------------------
+# 口径：XML **不提供金额**（FS 不知道我们的费率），只给**权威时长** →
+# 金额由 cdr_truth 用 XML 时长 + 本系统费率链重算；默认 reconcile_only（只兜底不覆盖）。
+# 落库经 cdr-writer 单线程队列，与 ESL 路径串行化（设计稿 v1.1 §13.2）。
+cdr_truth_wiring = cdr_truth.make_esl_wiring()
+
+
+@app.api_route("/fs/cdr", methods=["POST"])
+async def fs_cdr_api(request: Request):
+    """mod_xml_cdr 回调：解析 XML CDR → 兜底补全/重算金额（Basic 鉴权见 _auth_guard）。"""
+    if not get_int_setting("cdr_xml_enabled", 1):
+        return Response("xml cdr disabled", status_code=503)
+    body = await request.body()
+    if len(body) > cdr_truth.MAX_PAYLOAD_BYTES:
+        return JSONResponse({"detail": "payload too large"}, status_code=413)
+    try:
+        fields = cdr_truth.apply_xml_cdr(
+            cdr_truth.extract_cdr_xml(body, request.headers.get("content-type", "")),
+            mode=get_setting("cdr_xml_mode") or cdr_truth.DEFAULT_MODE,
+            **cdr_truth_wiring)
+    except ValueError as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    except Exception as e:  # noqa: BLE001 —— 回调失败不能让 FS 侧堆积 err-log
+        print("[fs_cdr] apply failed: %s" % e, flush=True)
+        return JSONResponse({"detail": "internal error"}, status_code=500)
+    return Response("OK uuid=%s billsec=%s" % (fields.get("uuid"), fields.get("billsec")),
+                    media_type="text/plain; charset=utf-8")
 
 
 @app.api_route("/fs/config", methods=["GET", "POST"])

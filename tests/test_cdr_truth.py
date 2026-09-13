@@ -21,6 +21,7 @@ from cdr_truth import (
     build_patch,
     parse_xml_cdr,
     apply_xml_cdr,
+    extract_cdr_xml,
 )
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "xml_cdr_a_leg.xml")
@@ -326,3 +327,91 @@ def test_apply_xml_cdr_rejects_bad_xml():
         apply_xml_cdr("<nope/>", row_loader=lambda db, u: None,
                       upsert_fn=lambda *a, **k: True, full_cols=FULL_COLS,
                       enqueue_fn=lambda uid, job: job(None))
+
+
+# ---------------------------------------------------------------------------
+# extract_cdr_xml —— /fs/cdr 请求体取值（纯函数）
+# ---------------------------------------------------------------------------
+
+MINIMAL_XML = (
+    "<cdr><variables>"
+    "<uuid>11111111-2222-3333-4444-555555555555</uuid>"
+    "<caller_id_number>9999</caller_id_number>"
+    "<hangup_cause>NORMAL_CLEARING</hangup_cause>"
+    "<start_epoch>1789286991</start_epoch>"
+    "<answer_epoch>1789286991</answer_epoch>"
+    "<end_epoch>1789287012</end_epoch>"
+    "<billsec>21</billsec>"
+    "<sip_term_status>200</sip_term_status>"
+    "</variables></cdr>"
+)
+
+
+def _looks_like_xml(s):
+    """真机 fixture 以 `<?xml version="1.0"?>` 声明开头（不是直接 <cdr>）。"""
+    return s.lstrip().startswith("<")
+
+
+def test_extract_raw_xml_body(xml_text):
+    out = extract_cdr_xml(xml_text.encode("utf-8"), "application/xml")
+    assert _looks_like_xml(out) and "<cdr" in out
+
+
+def test_extract_form_field_cdr(xml_text):
+    """★ 预期形态：form-urlencoded + 字段 cdr（值本身 URL-encoded）。"""
+    from urllib.parse import quote
+    body = ("cdr=" + quote(xml_text, safe="")).encode("utf-8")
+    out = extract_cdr_xml(body, "application/x-www-form-urlencoded")
+    assert _looks_like_xml(out)
+    assert "0fad61b6" in out           # 与源 XML 内容一致（已解码）
+
+
+def test_extract_form_field_xml_fallback(xml_text):
+    """字段名随 FS 版本而异 —— xml/data 也要兼容。"""
+    from urllib.parse import quote
+    body = ("xml=" + quote(xml_text, safe="")).encode("utf-8")
+    assert _looks_like_xml(extract_cdr_xml(body, "application/x-www-form-urlencoded"))
+    body2 = ("data=" + quote(MINIMAL_XML, safe="")).encode("utf-8")
+    assert _looks_like_xml(extract_cdr_xml(body2, ""))
+
+
+def test_extract_empty_and_junk():
+    assert extract_cdr_xml(b"", "application/x-www-form-urlencoded") == ""
+    assert extract_cdr_xml(b"foo=bar&baz=1", "application/x-www-form-urlencoded") == ""
+    assert extract_cdr_xml("   ", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# 身份闸门 —— 不污染话单
+# ---------------------------------------------------------------------------
+
+def test_minimal_xml_has_no_cdr_identity():
+    fx = parse_xml_cdr(MINIMAL_XML)
+    assert fx["uuid"] == "11111111-2222-3333-4444-555555555555"
+    assert fx["has_cdr_identity"] is False
+    assert fx["billsec"] == 21
+
+
+def test_fixture_has_cdr_identity(fields):
+    assert fields["has_cdr_identity"] is True
+
+
+def test_insert_skipped_without_identity():
+    """无 cdr_* 业务身份的呼叫（内线测试等）不新建行 —— 避免话单垃圾。"""
+    fx = parse_xml_cdr(MINIMAL_XML)
+    p = build_patch(fx, None, billing_fn=None, full_cols=FULL_COLS)
+    assert p["action"] == "skip"
+    assert p["reason"] == "no_cdr_identity"
+    assert p["vals"] == {}
+
+
+def test_existing_row_still_filled_without_identity():
+    """已存在的行（ESL 预落库过）即便无 cdr_* 也要补终态 —— 只是不算钱。"""
+    fx = parse_xml_cdr(MINIMAL_XML)
+    p = build_patch(fx, {"id": 9, "uuid": fx["uuid"], "cost": 0, "end_time": None,
+                         "hangup_cause": None, "bill_unit": 60},
+                    billing_fn=None, full_cols=FULL_COLS)
+    assert p["action"] == "fill"
+    assert p["vals"]["end_time"] == datetime(2026, 9, 13, 8, 10, 12)
+    assert p["vals"]["hangup_cause"] == "NORMAL_CLEARING"
+    assert "id" not in p["vals"]

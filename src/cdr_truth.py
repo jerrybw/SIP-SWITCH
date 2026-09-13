@@ -46,10 +46,23 @@ __all__ = [
     "AUTHORITATIVE_COLS",
     "BILLING_COLS",
     "XML_SOURCE",
+    "MAX_PAYLOAD_BYTES",
     "parse_xml_cdr",
     "build_patch",
     "apply_xml_cdr",
+    "extract_cdr_xml",
+    "make_esl_wiring",
 ]
+
+#: `/fs/cdr` 请求体上限（§13.3 #5：超限 413）。实测 XML CDR ~23KB，256KB 留足余量。
+MAX_PAYLOAD_BYTES = 256 * 1024
+
+#: 判定「这通呼叫是本系统经手/关注的」的通道变量 —— FS 对**每个**通道都会产出
+#: XML CDR，若不加此闸门，无关呼叫会在话单里插出业务维度全 NULL 的垃圾行。
+CDR_IDENTITY_VARS = (
+    "cdr_account_id", "cdr_access_point_id",
+    "cdr_caller_in", "cdr_callee_in", "cdr_caller_mid", "cdr_callee_mid",
+)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -251,6 +264,8 @@ def parse_xml_cdr(xml_text, include_raw=False):
         "record_path": g("rec_file"),
         "fs_hostname": g("FreeSWITCH-Hostname"),
         "core_uuid": g("Core-UUID"),
+        # 是否为「本系统经手」的呼叫（决定能否新建 CDR 行，见 _patch_insert）
+        "has_cdr_identity": any(raw.get(k) for k in CDR_IDENTITY_VARS),
     }
     if include_raw:
         fields["raw"] = raw
@@ -383,9 +398,9 @@ def build_patch(fields, existing, mode=DEFAULT_MODE, billing_fn=None, node_uuid=
     if existing is None:
         patch = _patch_insert(fields, billing_fn, node_uuid)
     else:
-        patch = _patch_existing(fields, existing, mode, billing_fn)
+        patch = _patch_existing(fields, existing, mode, billing_fn, node_uuid)
 
-    if full_cols:
+    if full_cols and patch["action"] != "skip":
         cols = [c for c in full_cols if c != "id"]
         patch["vals"] = {c: patch["vals"].get(c) for c in cols}
         patch["widened"] = True
@@ -394,6 +409,16 @@ def build_patch(fields, existing, mode=DEFAULT_MODE, billing_fn=None, node_uuid=
 
 def _patch_insert(fields, billing_fn, node_uuid):
     """库里没有该 uuid → 依 XML 新建一行（业务维度全取自 XML）。"""
+    if not fields.get("has_cdr_identity", True):
+        # 无任何 cdr_* 业务身份 → 不是本系统经手/关注的呼叫（FS 对每个通道都会产出
+        # XML CDR，含内线测试呼叫等）。为免污染话单，**不新建行**，仅记录跳过。
+        return {
+            "action": "skip",
+            "vals": {},
+            "preserve_cols": (),
+            "reason": "no_cdr_identity",
+            "fields": fields,
+        }
     unit = fields.get("bill_unit") or 60
     talk = fields.get("billsec") or 0
     bill = _bill_seconds(talk, unit)
@@ -456,7 +481,7 @@ def _patch_insert(fields, billing_fn, node_uuid):
     }
 
 
-def _patch_existing(fields, existing, mode, billing_fn):
+def _patch_existing(fields, existing, mode, billing_fn, node_uuid=None):
     """库里已有该 uuid → 只补缺失 / 按需重算金额；**默认绝不覆盖已有非空值**。"""
     vals = {k: v for k, v in existing.items() if k != "id"}
     vals["uuid"] = fields["uuid"]
@@ -468,6 +493,13 @@ def _patch_existing(fields, existing, mode, billing_fn):
         if _is_empty(vals.get(col)):
             vals[col] = v
             filled.append(col)
+
+    # 节点归属：XML 路径直接写本节点 NODE_UUID（§13.4 ③），不从 XML 反查。
+    # 意义：reconcile 回填的骨架行 fs_node_uuid 为 NULL（是 cdr_health 的
+    # 「可疑行」指纹）；被 XML 补齐终态/金额后应带上节点，否则会被误判为未修复。
+    if node_uuid and _is_empty(vals.get("fs_node_uuid")):
+        vals["fs_node_uuid"] = node_uuid
+        filled.append("fs_node_uuid")
 
     # authoritative 模式：允许 XML 覆盖原因/时长（默认不启用，留待评审后决定）
     if mode == MODE_AUTHORITATIVE:
@@ -579,6 +611,10 @@ def apply_xml_cdr(xml_text, *, row_loader, upsert_fn, enqueue_fn, full_cols=None
         existing = row_loader(db, fields["uuid"])
         patch = build_patch(fields, existing, mode=mode, billing_fn=billing_fn,
                             node_uuid=node_uuid, full_cols=full_cols)
+        if patch["action"] == "skip":
+            print("[cdr-xml] skip uuid=%s reason=%s" % (fields["uuid"], patch.get("reason")),
+                  flush=True)
+            return False
         kwargs = {"db": db}
         if preserve_supported:
             kwargs["preserve_cols"] = patch.get("preserve_cols") or ()
@@ -590,3 +626,79 @@ def apply_xml_cdr(xml_text, *, row_loader, upsert_fn, enqueue_fn, full_cols=None
 
     enqueue_fn(fields["uuid"], _job)
     return fields
+
+
+# ---------------------------------------------------------------------------
+# 4) 端点装配辅助（供 api/app.py 使用；本模块保持「不 import esl_client/db」）
+# ---------------------------------------------------------------------------
+
+def extract_cdr_xml(body, content_type=""):
+    """从 `/fs/cdr` 请求体取出 XML 文本（纯函数）。
+
+    mod_xml_cdr 以 `application/x-www-form-urlencoded` 提交，XML 放在某个字段里；
+    **字段名随 FS 版本/配置而异**（设计稿 §5.4 列为待实测项），故这里三者都兼容：
+      ① 表单字段 `cdr`（预期）　② 表单字段 `xml` / `cdr_xml` / `data`
+      ③ 整个 body 就是 XML（`<` 开头，未编码）
+    取不到时返回空串（端点回 400）。
+    """
+    if isinstance(body, (bytes, bytearray)):
+        raw = bytes(body).decode("utf-8", "replace")
+    else:
+        raw = body or ""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if raw.startswith("<"):
+        return raw
+    ctype = (content_type or "").lower()
+    if "form-urlencoded" in ctype or "=" in raw:
+        try:
+            q = urllib.parse.parse_qs(raw, keep_blank_values=True)
+        except Exception:       # noqa: BLE001
+            q = {}
+        for key in ("cdr", "xml", "cdr_xml", "data"):
+            vals = q.get(key)
+            if vals and vals[0].strip():
+                return vals[0].strip()
+        # 兜底：任何看起来像 XML 的值
+        for vals in q.values():
+            for v in vals:
+                if v.strip().startswith("<"):
+                    return v.strip()
+    return ""
+
+
+def make_esl_wiring():
+    """装配 `/fs/cdr` 端点所需的依赖（**延迟 import**，保持本模块可独立单测）。
+
+    :return: dict（可直接 `**` 展开进 `apply_xml_cdr`）
+             row_loader / upsert_fn / enqueue_fn / billing_fn / full_cols / node_uuid
+    """
+    from sqlalchemy import select
+
+    from esl_client import (_upsert_cdr_dict, _enqueue_cdr_job, _compute_billing)
+    from db.models import Cdr
+    from core.config import NODE_UUID
+
+    full_cols = [c.name for c in Cdr.__table__.columns]
+    all_cols = list(Cdr.__table__.columns)
+
+    def _row_loader(db, call_uuid):
+        """读该 uuid 的现有 CDR 行（全列 dict）；无则 None。
+
+        注意：本函数**必须**在 cdr-writer 线程内被调用（apply_xml_cdr 的 job 里），
+        与 ESL 路径的写串行化，才没有读-改-写窗口（设计稿 §13.2）。
+        """
+        row = db.scalar(select(Cdr).where(Cdr.uuid == call_uuid))
+        if row is None:
+            return None
+        return {c.name: getattr(row, c.name) for c in all_cols}
+
+    return {
+        "row_loader": _row_loader,
+        "upsert_fn": _upsert_cdr_dict,
+        "enqueue_fn": _enqueue_cdr_job,
+        "billing_fn": _compute_billing,
+        "full_cols": full_cols,
+        "node_uuid": NODE_UUID,
+    }
