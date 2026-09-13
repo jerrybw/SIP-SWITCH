@@ -1,0 +1,30 @@
+<configuration name="xml_cdr.conf" description="XML CDR Logger（P1 CDR 真源，mod_xml_cdr）">
+  <settings>
+    <!-- 上报地址：指向 compose 内 gateway 服务的 /fs/cdr。
+         __GATEWAY_URL__ / __XMLCURL_USER__ / __XMLCURL_PASSWORD__ 由 docker-entrypoint-fs.sh
+         在容器启动时用环境变量渲染（与 xml_curl.conf.xml 同源）。
+         网关侧 /fs/cdr 走同一套 Basic 凭据（fs_auth.py），fail-closed。 -->
+    <param name="url" value="__GATEWAY_URL__/fs/cdr"/>
+    <param name="cred" value="__XMLCURL_USER__:__XMLCURL_PASSWORD__"/>
+
+    <!-- 磁盘留档：POST 失败（网关未起/重启/网络抖动）时的兜底原件，也是本设计抓 fixture 的来源。
+         容器内固定路径，宿主以卷挂载（见 docker-compose.yml），容器重建不丢。 -->
+    <param name="log-dir" value="/usr/local/freeswitch/log/xml_cdr"/>
+    <param name="log-http-and-disk" value="true"/>
+
+    <!-- encode=false：plain XML（便于 dump 做 fixture、便于人工排查）。
+         解析端按 cdr 表单字段取原始 XML 文本。 -->
+    <param name="encode" value="false"/>
+
+    <!-- 只记 A 腿（B 腿不落）：与现有 CDR 归属口径一致 -->
+    <param name="log-b-leg" value="false"/>
+    <param name="prefix-a-leg" value="true"/>
+
+    <!-- 上报失败重试 -->
+    <param name="retries" value="2"/>
+    <param name="delay" value="1"/>
+
+    <!-- 避免 Expect: 100-continue 造成的网关侧等待 -->
+    <param name="disable-100-continue" value="true"/>
+  </settings>
+</configuration>

@@ -64,6 +64,7 @@ services:
       # #70 录音：FS 写、网关只读回源，两者挂同一宿主目录（容器重建录音不丢）。
       # 容器内固定 /recordings（= record.dir 默认值）；录音实际落在 /recordings/<node_uuid>/ 下。
       - ./data/recordings:/recordings
+      - ./data/xml_cdr:/usr/local/freeswitch/log/xml_cdr
     entrypoint: ["/fs-config/docker-entrypoint-fs.sh"]
     command: ["sh", "-c", "exec ${FS_COMMAND}"]
     networks:
