@@ -87,6 +87,15 @@ def _apply_defaults(cfg):
     if cc.get("backend") not in ("redis", "local"):
         cc["backend"] = "redis"
     cfg["concurrency"] = cc
+
+    # P2 全局并发上限（第1/3类：启动快照，重启生效）。0 = 不限制（非"禁止"）。
+    # 容量属性，刻意不做热配：运行中收紧要么形同虚设、要么得拆在途通话，
+    # "运行中收紧"本身不可正确实现（设计定稿 Q1 拍板，勿顺手加 system_setting）。
+    try:
+        cfg.setdefault("concurrent_limit_global", 0)
+        cfg["concurrent_limit_global"] = max(0, int(cfg.get("concurrent_limit_global") or 0))
+    except (TypeError, ValueError):
+        cfg["concurrent_limit_global"] = 0
     return cfg
 
 

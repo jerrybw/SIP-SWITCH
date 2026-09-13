@@ -74,6 +74,7 @@ node2 = `freeswitch2` + `gateway2`，**定义全部在 `docker-compose.override.
 | 改源码后生效 | `docker compose build gateway`（COPY 非挂载，**必须重建镜像**；无参 `build` 会连带重建 FS 30–60min，勿用） |
 | 落地网关配置刷新 | FS 里是旧快照 → 必须 killgw + rescan（rescan 对已存在 gateway 无效） |
 | WSL 重启后重注 IP | `./dev-up.sh` |
+| 全局并发上限（P2） | `config_settings.yaml` 顶层 `concurrent_limit_global`（0=不限制，>0=全局在途上限，超出 503 busy_limit_global）；**容量属性，改后须重启网关生效**，不支持热更 |
 
 ---
 

@@ -75,3 +75,10 @@ redis:
   port: 6379
   password: ""
   db: 0
+
+# ---- 全局并发上限（P2，第1/3类：启动快照，改后须重启网关生效）----
+# 预检 ⑤' 段的全局维度闸门（app.py 读取 settings.get("concurrent_limit_global")）。
+#   0 = 不限制（默认；不是"禁止"）   >0 = 全局在途并发上限，超出整通 503 busy_limit_global
+# ⚠️ 容量属性（与 node.uuid 同级），不支持运行中热更：运行中收紧要么形同虚设、
+#    要么得拆在途通话，"运行中收紧"本身不可正确实现（P2 设计定稿 Q1 拍板）。
+concurrent_limit_global: 0

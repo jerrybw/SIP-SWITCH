@@ -57,8 +57,15 @@ redis:
   password:                    # 无密码留空
   db: 0
 
+# ---- 全局并发上限（P2，第1/3类：启动快照，改后须重启网关生效）----
+# 预检 ⑤' 段的全局维度闸门（app.py 读取 settings.get("concurrent_limit_global")）。
+#   0 = 不限制（默认；不是"禁止"）   >0 = 全局在途并发上限，超出整通 503 busy_limit_global
+# ⚠️ 容量属性（与 node.uuid 同级），不支持运行中热更：运行中收紧要么形同虚设、
+#    要么得拆在途通话，"运行中收紧"本身不可正确实现（P2 设计定稿 Q1 拍板）。
+concurrent_limit_global: 0
+
 concurrency:                   # P2-a 并发原子预留（第1/3类，启动生效）
-  backend: redis               # redis（默认，D7 原子预留真源）| local（旧事件驱动近似计数）
+  backend: redis               # redis（默认，D7 原子预留真源）| local（事件驱动近似计数，仅限开发/无 Redis 部署——生产必须 redis）
   fail_open: false             # D5 逃生开关：true=Redis 不可用时回落本地计数放行（默认 fail-close 拒新增）
   lease_ttl: 86400             # 预留凭证 TTL（秒）；正常由挂断/对账释放，TTL 仅防极端泄漏积累
 

@@ -1569,6 +1569,7 @@ async function bootAuth() {
   try {
     const me = await api('/api/me');
     renderUser(me.user, me.role);
+    refreshConcSourceHint();
     showSection('access-points');
   } catch (e) {
     showLogin();
@@ -1576,6 +1577,24 @@ async function bootAuth() {
 }
 window.doLogin = doLogin;
 window.doLogout = doLogout;
+
+// ---- P2 G2/Q3：并发快照来源徽标（运维可见——影子态必须显式提示，否则打标=没人看）----
+// /api/stats/concurrency 带 source 字段（app.py P2 批次）；后端未升级时字段缺省=正常显示。
+// source=shadow 即 Redis 不可用回落影子近似计数：徽标 + 悬浮说明，提示数据仅供排障参考。
+function refreshConcSourceHint() {
+  api('/api/stats/concurrency').then(function (d) {
+    var a = document.getElementById('conc-link');
+    if (!a || !d) return;
+    if (d.source === 'shadow') {
+      a.textContent = '并发快照 ⚠';
+      a.title = 'Redis 不可用：当前展示为影子近似计数（仅供排障参考，非真源）';
+    } else {
+      a.textContent = '并发快照';
+      a.title = d.source === 'redis' ? 'Redis 实时真源' : '';
+    }
+  }).catch(function () { /* 展示增强，失败静默 */ });
+}
+window.refreshConcSourceHint = refreshConcSourceHint;
 
 // ===========================================================================
 // M3 T-301 用户管理（Phase 1，2026-09-12 拍板）· 本区 M3 独占
