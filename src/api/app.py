@@ -169,7 +169,7 @@ from api.auth import get_current_admin, router as auth_router
 from api.billing import router as billing_router
 from api.accounts import router as accounts_router
 from api.cdr_export import router as cdr_export_router  # T-306 扩展点
-from api.oplog import oplog_middleware  # T-301 扩展点
+from api.oplog import oplog_middleware, router as oplog_router  # T-301 扩展点
 from api.csrf import csrf_middleware  # 安全扩展点：同源写校验（实现见 api/csrf.py）
 from api.users import router as users_router  # T-301 M3：用户管理（须在 crud 兜底前注册，#34）
 from api.authz import write_guard_middleware  # T-301 M3：viewer 只读守卫（实现见 api/authz.py）
@@ -343,6 +343,7 @@ app.include_router(billing_router)
 app.include_router(accounts_router)
 app.include_router(cdr_export_router)  # T-306：须在 crud 兜底路由前注册（PITFALLS #34）
 app.include_router(users_router)  # T-301 M3：用户管理（须在 crud 兜底前注册，PITFALLS #34）
+app.include_router(oplog_router)  # T-301 M3：操作日志查询（须在 crud 兜底前注册，PITFALLS #34）
 app.include_router(crud_router)
 
 

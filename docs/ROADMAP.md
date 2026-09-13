@@ -483,8 +483,9 @@ role 列无实际意义。用户管理是角色体系成立的前提，纳入 M3
 
 ### 5. M3 尾巴收口复核
 - **操作日志**：写入面早已完整（`oplog.py` 中间件自动埋点 + `record_op` 显式埋点，
-  显式 `created_at` 避坑 #33/#37）；**查询面缺失**，本轮补齐
-  `GET /api/operation-logs`（分页 + operator 模糊 + action 精确）。
+  显式 `created_at` 避坑 #33/#37）；**查询面已补齐并挂载（✅ 维护者拍板 2026-09-13）**：
+  `GET /api/operation-logs`（分页 + operator 模糊 + action 精确；登录即可查、
+  viewer 可查——审计面全员可见口径）。
   ⚠️ **待维护者拍板**：挂载需 `app.py` 加一行 `include_router`（crud 兜底前，#34），
   router 定义已就绪（`api/oplog.py`），app.py 冻结故未擅动。
 - **CDR 导出**：复核指标全过——字段与 /api/cdr 列表核心列对齐 ✓ / 时间范围 ✓ /
@@ -517,6 +518,15 @@ role 列无实际意义。用户管理是角色体系成立的前提，纳入 M3
   - 栈已 dev-down（卷保留；种子/用户数据在卷内，下次 dev-up 直接可用）
 
 ### 已知卡点（需维护者拍板）
-1. `app.py` +1 行：`app.include_router(oplog_router)`（crud 兜底前）——用户管理
-   同批 +5 行已获认可，本行为 oplog 查询面生效的前提。
-2. 本分支 3 个 commit 待 push（用户统一推送）。
+1. ~~`app.py` +1 行：`app.include_router(oplog_router)`~~ **已拍板并落地（2026-09-13）**：
+   维护者认可（性质与 users_router 同批 +5 行相同，均为扩展点挂载）：172 行 import
+   并入 router、`users_router` 后 `crud_router` 前挂载（#34）；oplog 路由同步加
+   **显式登录声明** `Depends(require_role())`（空 roles = 仅校验登录，自文档化；
+   安全性本由全站 _auth_guard 兜底）。权限口径拍板：**登录即可查、不限角色
+   （viewer 可查，审计面全员可见）**。
+   - 测试：`test_users_m3.py` 新增 4 例（未登录 401 / 三角色×登录放行且
+     ENFORCE_ROLE=True 下断言不受只读守卫误伤 / record_op 写入面+过滤分页）。
+   - zdev 容器复验：404→200；未登录 401；**viewer 登录后 200**（total=36）；
+     action 精确过滤 2 条 / operator 模糊 2 条；自动埋点确认落库（上轮 E2E
+     的 35 次写操作全在 operation_log：admin delete /api/users/5 等）。
+2. 本分支 commit 待 push（用户统一推送）。

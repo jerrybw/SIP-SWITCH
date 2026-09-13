@@ -485,3 +485,77 @@ def test_enforce_role_flipped():
     """M3 Phase 1 验证后 ENFORCE_ROLE=True（fail-open 观察期结束）。
     该断言守住「不许再静默翻回 False」——回退须改测试说明理由。"""
     assert ENFORCE_ROLE is True
+
+
+# ===========================================================================
+# 4. oplog 查询面（T-301 尾巴，2026-09-13 维护者拍板挂载）
+#    口径：登录即可查、不限角色（viewer 可查）；ENFORCE_ROLE=True 下不被
+#    write_guard / require_role 误伤。middleware 已挂载不重复测挂载本身。
+# ===========================================================================
+
+def test_oplog_query_requires_login(db_session, monkeypatch):
+    """① 未登录 -> 401（require_role() 空 roles = 仅校验登录，显式声明）。"""
+    _CUR_SESSION["db"] = db_session
+    monkeypatch.setattr(_ds_mod, "SessionLocal", lambda: _CUR_SESSION["db"])
+    monkeypatch.setattr(_authz_mod, "SessionLocal", lambda: _CUR_SESSION["db"])
+
+    def _no_cookie(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    monkeypatch.setattr(_authz_mod, "get_current_admin", _no_cookie)
+    with pytest.raises(HTTPException) as e:
+        _dep(require_role(), db_session)
+    assert e.value.status_code == 401
+    _CUR_SESSION["db"] = None
+
+
+@pytest.mark.parametrize("actor,role", [("vicky", 0), ("adam", 1), ("sue", 2)])
+def test_oplog_query_all_roles_allowed(db_session, monkeypatch, actor, role):
+    """② 登录后任何角色（含 viewer）-> 依赖放行；ENFORCE_ROLE=True 状态下断言
+    「角色不被限制」——viewer 不被 require_role（空 roles）或只读守卫误伤。"""
+    assert ENFORCE_ROLE is True, "本断言在 ENFORCE_ROLE=True 口径下才有意义"
+    _mk_user(db_session, actor, role=role)
+    _CUR_SESSION["db"] = db_session
+    monkeypatch.setattr(_authz_mod, "SessionLocal", lambda: _CUR_SESSION["db"])
+    monkeypatch.setattr(_authz_mod, "get_current_admin", lambda r: actor)
+    out = _dep(require_role(), db_session)   # oplog 路由的 dependencies 同款依赖
+    assert out["user"] == actor
+    assert out["role"] == ROLE_NAME_OF(role)
+    # GET 不在 write_guard 的 _WRITE_METHODS 内 -> 查询面不受只读守卫影响
+    assert "GET" not in _authz_mod._WRITE_METHODS
+    _CUR_SESSION["db"] = None
+
+
+def ROLE_NAME_OF(v):
+    return {0: "viewer", 1: "admin", 2: "super"}[v]
+
+
+def test_oplog_query_filters_and_paging(db_session, monkeypatch):
+    """③ 查询逻辑本身：record_op 写入面 -> 列表过滤（operator 模糊 / action 精确）
+    + 分页形状。record_op 走 SessionLocal（真实写入路径，桩到 SQLite）。"""
+    import api.oplog as _oplog_mod
+    _CUR_SESSION["db"] = db_session
+    monkeypatch.setattr(_oplog_mod, "SessionLocal", lambda: _CUR_SESSION["db"])
+    # 造三条：两条 super 的 post、一条 anonymous 的 delete
+    _oplog_mod.record_op("sue", "post", "http", "/api/users", {"status": 201})
+    _oplog_mod.record_op("sue", "post", "http", "/api/gateways", {"status": 200})
+    _oplog_mod.record_op("anonymous", "delete", "http", "/api/users/1", {"status": 200})
+    db_session.expire_all()
+
+    from api.oplog import list_operation_logs
+    # 直调端点：Query() 默认值不经 FastAPI 解析，page/page_size 须显式传（与
+    # 真实请求等价；E2E 在 zdev 容器已覆盖 URL 参数路径）
+    r_all = list_operation_logs(page=1, page_size=50, db=db_session)
+    assert r_all["total"] == 3 and len(r_all["items"]) == 3
+    assert r_all["page"] == 1 and r_all["total_pages"] == 1
+
+    r_op = list_operation_logs(page=1, page_size=50, operator="su", db=db_session)
+    assert r_op["total"] == 2
+    r_act = list_operation_logs(page=1, page_size=50, action="delete", db=db_session)
+    assert r_act["total"] == 1 and r_act["items"][0]["operator"] == "anonymous"
+
+    r_pg = list_operation_logs(page=2, page_size=2, db=db_session)
+    assert r_pg["total"] == 3 and r_pg["total_pages"] == 2
+    assert len(r_pg["items"]) == 1                                  # 第 2 页剩 1 条
+    assert [i["id"] for i in r_all["items"]] == sorted(
+        [i["id"] for i in r_all["items"]], reverse=True)           # id 倒序
+    _CUR_SESSION["db"] = None

@@ -10,10 +10,11 @@
    成功或业务失败（<500）即记一行，operator 取当前登录用户。
 2. 显式埋点：业务代码记录非 HTTP 语义操作时调用 record_op(...)。
 
-查询面（2026-09-13 M3 收口补齐）：GET /api/operation-logs 分页 + operator/action
-过滤。⚠️ router 须在 app.py include_router(crud_router) 之前注册（PITFALLS #34，
-否则被 /api/{entity} 兜底吞掉）—— 需在 app.py 加一行挂载，**待维护者确认后挂**
-（app.py 冻结；users_router 同批已获认可的 +5 行不含本 router）。
+查询面（2026-09-13 M3 收口补齐，维护者已批挂载）：GET /api/operation-logs
+分页 + operator/action 过滤；登录即可查、不限角色（维护者拍板：审计面全员可见，
+viewer 也可查）。登录要求**显式声明**在路由上（require_role() 空 roles = 仅校验
+登录）——安全性由全站 _auth_guard 兜底，显式写法是防将来白名单调整时被绕过。
+router 注册在 crud 兜底之前（app.py 已挂载，PITFALLS #34）。
 """
 from datetime import datetime
 
@@ -21,6 +22,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from api.authz import require_role
 from db.models import OperationLog
 from db.session import SessionLocal, get_db
 
@@ -30,12 +32,12 @@ _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SKIP_PATHS = {"/api/login", "/api/logout"}
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_role())])
 def list_operation_logs(page: int = Query(1, ge=1),
                         page_size: int = Query(50, ge=1, le=200),
                         operator: str = None, action: str = None,
                         db: Session = Depends(get_db)):
-    """管理端操作日志查询（只读；登录即可查，不做角色限制——审计面全员可见）。"""
+    """管理端操作日志查询（只读；登录即可查，不限角色——维护者拍板口径）。"""
     q = select(OperationLog)
     if operator:
         q = q.where(OperationLog.operator.like("%" + operator + "%"))
