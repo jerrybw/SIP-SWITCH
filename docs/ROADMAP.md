@@ -447,3 +447,62 @@ role 列无实际意义。用户管理是角色体系成立的前提，纳入 M3
 - `migrate.py`：改动先报备（两边都往尾部追加，串行合入；后合方 rebase）
 - 前端（admin.js + templates）：M3 独占；P2-a 不动前端
 - `templates/index.html` 缓存版本号：由最后合入 main 的一方 bump 一次
+
+## 2026-09-13 修复记录（M3 T-301 用户管理 Phase 1 完成，zcode 会话，dev 验证通过，待 push）
+
+**范围**：§2026-09-12 M3 范围补录 Phase 1 全量 + §4 M3 尾巴（oplog/cdr_export）收口复核。
+**分支**：`feature/zcode/t301-users-roles`（基于 main c467dba）。
+
+### 1. 登录切 DB（用户拍板项 2）✅
+- `api/auth.py` `_login_check_db`：DB 优先登录三分支——命中启用行校验 / 空表回落
+  config admin（bootstrap）/ DB 异常拒登（fail-closed）。**顺带修真 bug**：
+  `select(SysUser).count()` 在 SQLAlchemy 2.0 不存在（Query 时代 API），空表分支
+  永远走不到且被 except 吞成静默拒登 → 改 `select(func.count()).select_from(SysUser)`。
+- `db/migrate.py` 尾部追加（已按约定报备）：`ensure_sys_user_seed`（sys_user 空表按
+  config 写一条 super）+ `ensure_sys_user_role_comment`（role 列注释对齐三档口径）。
+- `db/session.py` 启动期挂载种子迁移。
+
+### 2. 用户 CRUD + 守卫（拍板项 3）✅
+- `api/users.py`（新，不走 crud 兜底；super-only）：创建/编辑/重置密码/启停/删除 +
+  改自己密码（任何角色，旧口令校验）。
+- 守卫口径修正：**降级/删除的 last-super 守卫只保护「启用的」super 行**（与
+  `_enabled_super_count` 计数口径一致；停用的 super 可降级不误拦）；
+  不可停用/降级/删除自己保留原语义。
+
+### 3. 角色三档 + ENFORCE_ROLE=True（拍板项 1/5）✅
+- `api/authz.py`：ROLE_NAMES {0:viewer,1:admin,2:super}；`write_guard_middleware`
+  viewer 全站只读（403）；`/api/users/me/password` 豁免（只读指业务数据不含自身凭据）；
+  `ENFORCE_ROLE=True`（fail-open 观察期结束，契约测试 `test_enforce_role_flipped` 锁住防回退）。
+
+### 4. 前端（拍板项 4）✅
+- 用户管理页（superOnly 侧栏）+ 操作日志页（superOnly，分页+operator/action 过滤）
+  + viewer 隐藏「+新增」按钮 + 顶栏「改密码」入口；`/api/me` 响应带 `role`；
+  `index.html` bump `?v=20260913a`。
+- 回归修复：手写弹层替换 `modal-save.onclick` 后，`closeModal` 恢复 `saveForm`
+  绑定（否则 SECTIONS 编辑表单静默失效）。
+
+### 5. M3 尾巴收口复核
+- **操作日志**：写入面早已完整（`oplog.py` 中间件自动埋点 + `record_op` 显式埋点，
+  显式 `created_at` 避坑 #33/#37）；**查询面缺失**，本轮补齐
+  `GET /api/operation-logs`（分页 + operator 模糊 + action 精确）。
+  ⚠️ **待维护者拍板**：挂载需 `app.py` 加一行 `include_router`（crud 兜底前，#34），
+  router 定义已就绪（`api/oplog.py`），app.py 冻结故未擅动。
+- **CDR 导出**：复核指标全过——字段与 /api/cdr 列表核心列对齐 ✓ / 时间范围 ✓ /
+  limit≤10万 ✓ / 注册在 crud 兜底前（#34）✓。口径注释澄清：导出过滤用
+  `created_at`（落库时间，分区表分布键）而列表用 `start_time`（通话发生时间），
+  两者语义**刻意不同**；查询链式顺序理顺（where 先于 order_by/limit）。
+
+### 验证（2026-09-13，本地无 MySQL 环境）
+- 全量 pytest：**67 passed / 37 skipped / 0 failed**（route_selection/rules_engine
+  按既有口径无 MySQL 收集期 skip；`tests/test_users_m3.py` 新增 21 例全绿：
+  登录三分支 / CRUD 守卫 / last-super 矩阵 / require_role 403 / write_guard
+  viewer 只读 / ROLE_NAMES 契约 / ENFORCE_ROLE 契约）。
+- `node --check` admin.js 通过。测试对 py3.10+pydantic2.13 的 Session 注解
+  ForwardRef 求值问题做了规避（直调端点函数；容器 py3.12 不受影响）。
+- **E2E 待补**：zstack 独立栈 build context 指向 zcode clone 的变体由 root 侧
+  准备中；就绪后补真实容器验证（登录/种子/角色 403 矩阵/用户 CRUD/oplog 落库）。
+
+### 已知卡点（需维护者拍板）
+1. `app.py` +1 行：`app.include_router(oplog_router)`（crud 兜底前）——用户管理
+   同批 +5 行已获认可，本行为 oplog 查询面生效的前提。
+2. 本分支 3 个 commit 待 push（用户统一推送）。
