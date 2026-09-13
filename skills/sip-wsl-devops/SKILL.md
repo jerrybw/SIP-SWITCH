@@ -10,7 +10,7 @@ agent_created: true
 
 | 项 | 值 |
 |---|---|
-| DEV 定义 | **本机 WSL**（Ubuntu 24.04），不是 docker 容器、不是 Windows |
+| DEV 定义 | **本机 WSL**（Ubuntu **22.04.5 LTS / Jammy**），不是 docker 容器、不是 Windows |
 | 接入 | `ssh -i <WSL_SSH_PRIVATE_KEY> root@localhost -p 22022`（**仅密钥登录**；devroot 已禁用密码登录，私钥不入库） |
 | 源码（source of truth） | `/root/src/SIP-SWITCH/`（git remote `github.com/jerrybw/SIP-SWITCH.git`） |
 | compose | `/root/src/SIP-SWITCH/docker-compose.yml` + `--env-file .env` |

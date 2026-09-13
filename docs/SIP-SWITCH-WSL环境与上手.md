@@ -9,7 +9,7 @@
 
 | 项 | 值 |
 |---|---|
-| DEV | 本机 **WSL（Ubuntu 24.04）** |
+| DEV | 本机 **WSL（Ubuntu 22.04.5 LTS / Jammy）** |
 | 源码唯一真源 | WSL `/root/src/SIP-SWITCH/`（`github.com/jerrybw/SIP-SWITCH.git`，main） |
 | 接入 | `ssh -i <WSL_SSH_PRIVATE_KEY> root@localhost -p 22022`（**仅密钥登录**，devroot 已禁用密码登录） |
 | 部署形态 | docker compose（项目名 `sip-switch`） |
