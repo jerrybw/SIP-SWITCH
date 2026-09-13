@@ -41,6 +41,14 @@ ESL_CFG = settings["esl"]
 _call_store: dict[str, dict] = {}
 _store_lock = threading.Lock()
 
+# P1 §13.1 #4：**计费组列**。ESL 路径「降级」时（事件变量不全 → talk/cost 算不出来，
+# 典型：网关重启丢 _call_store 后 HANGUP_COMPLETE 的 rec 为 minimal）这些列必须保护，
+# 否则整行 upsert（upd 为全列）会把 XML CDR 真源（P1）已算好的金额清零。
+BILLING_COLS = (
+    "cost", "rate_used", "cost_price", "cost_rate_used",
+    "cost_bill_unit", "profit", "bill_duration", "talk_duration",
+)
+
 # P2 实时并发计数器（T-206 前置）：三档原子计数。
 #   global = 全局并发；ap/gw = owner_id -> 并发数（接入点/落地网关维度）。
 # 计数口径：仅对主(A)腿计数，下游(B)腿合并不双计；cdr_* 通道变量到达即补计 ap/gw。
@@ -795,6 +803,11 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         if talk > 0:
             bill = ceil(talk / bill_unit) * bill_unit
 
+    # R1（P1 §13.1）：本腿「降级」判定 —— 事件未带 answer_time 说明通道变量不全
+    # （网关重启丢 _call_store 时 HANGUP_COMPLETE 走 minimal rec 分支），此时 talk/cost
+    # 必然算不出来。不加保护的话，整行 upsert 会把 XML CDR 真源已算好的金额清零。
+    _degraded = rec.get("answer_time") is None
+
     # v0.3：当通消费(收入侧) + 当通成本(成本侧) + 账户维度解析（仅接通计费；费率链见 _compute_billing）
     cost, rate_used, account_id, business_id, customer_id, cost_price, cost_rate_used, cost_bill_unit = _compute_billing(rec, talk, bill)
     # dialplan 阶段拦截（预付费余额不足 603 等）显式下发 cdr_account_id：无 bridge、_compute_billing
@@ -908,7 +921,8 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
     # 落库成功才扣费，落库最终失败 spool 兜底。
     def _persist_and_charge(db):
         ok = _upsert_cdr_dict(
-            {c.name: getattr(cdr, c.name) for c in cdr.__table__.columns}, db=db)
+            {c.name: getattr(cdr, c.name) for c in cdr.__table__.columns}, db=db,
+            preserve_cols=BILLING_COLS if _degraded else ())
         if not ok:
             raise RuntimeError("upsert returned False")
         # v0.3 预付费：落库成功后扣费（仅在接通且消费>0 且未扣过）。三道防重扣闸见 _charge_account。
@@ -927,7 +941,8 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         except Exception as e:
             print("[billing] charge carrier failed (uuid=%s): %s" % (cdr.uuid, e))
 
-    _enqueue_cdr_job(call_uuid, _persist_and_charge, fallback=lambda: _spool_cdr(cdr))
+    _enqueue_cdr_job(call_uuid, _persist_and_charge,
+                     fallback=lambda: _spool_cdr(cdr, degraded=_degraded))
 
 
 class ESLClient:
@@ -1074,7 +1089,8 @@ def pre_insert_cdr(call_uuid, caller_in="", callee_in="", account_id=None,
         return False
 
 
-def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False, db=None):
+def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False, db=None,
+                     preserve_cols=()):
     """T-208/T-计费：MySQL upsert（ON DUPLICATE KEY UPDATE）。
 
     重复事件 / reaper 重灌均幂等：冲突时按 uuid 更新（排除 id/uuid；created_at 由终态覆盖写入），
@@ -1082,6 +1098,9 @@ def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False, db=None):
 
     ignore_existing=True 时用于「预落库」场景：uuid 已存在就什么都不做（保护已落 HANGUP 终态不被
     覆盖）；不存在就插入。语义等同 INSERT IGNORE 但不吞 IntegrityError，仍会 retry。
+
+    preserve_cols：**不参与** ON DUPLICATE KEY UPDATE 的列（已落库的值保持不变）。
+    默认空元组 = 行为与改造前**完全一致**。新增动机见模块常量 BILLING_COLS（P1 R1）。
     """
     cols = [c.name for c in Cdr.__table__.columns]
     # NOT NULL 列兜底：DB 已标 NOT NULL DEFAULT 的列若 vals 显式传 None 会触发 IntegrityError(1048)
@@ -1128,7 +1147,10 @@ def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False, db=None):
                 # 预落库场景：UUID 已存在时不更新任何列（保护 HANGUP 路径落下的终态）。
                 upd = {"id": Cdr.id}
             else:
-                upd = {c: stmt.inserted[c] for c in cols if c not in ("id", "uuid")}
+                # preserve_cols：这些列不进 UPDATE 集合，保留库中现值。
+                # 与上面 ignore_existing 是同一模式（只保护、不写值）的自然延伸。
+                _skip = set(preserve_cols) | {"id", "uuid"}
+                upd = {c: stmt.inserted[c] for c in cols if c not in _skip}
             stmt = stmt.on_duplicate_key_update(**upd)
             s.execute(stmt)
             if own:
@@ -1151,12 +1173,15 @@ def _upsert_cdr_dict(vals: dict, attempts=3, ignore_existing=False, db=None):
                 s.close()
 
 
-def _spool_cdr(cdr):
+def _spool_cdr(cdr, degraded=False):
     try:
         spool = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'cdr_spool')
         os.makedirs(spool, exist_ok=True)
         path = os.path.join(spool, cdr.uuid + '.json')
         data = {c.name: getattr(cdr, c.name) for c in cdr.__table__.columns}
+        # P1 §13.1 #5：一并记「降级标记」，重灌时同样保护计费列（否则重灌等于清零）
+        if degraded:
+            data["_degraded"] = True
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, default=str, ensure_ascii=False)
         print('[CDR] SPOOLED', path)
@@ -1536,7 +1561,9 @@ def _replay_spool():
             for k, v in data.items():
                 if k in vals:
                     vals[k] = v
-            if _upsert_cdr_dict(vals):
+            # 降级腿重灌同样保护计费列（P1 §13.1 #5）
+            _pc = BILLING_COLS if data.get("_degraded") else ()
+            if _upsert_cdr_dict(vals, preserve_cols=_pc):
                 os.remove(fp)
                 print('[CDR] reaper replayed', os.path.basename(fp))
         except Exception as e:

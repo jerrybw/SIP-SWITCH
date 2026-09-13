@@ -13,7 +13,7 @@
 
 ---
 
-## 📑 全量索引（65 条 · 一句话速查）
+## 📑 全量索引（74 条 · 一句话速查）
 
 ### A. FS / sofia / 机制 A（19 条）
 | # | 一句话 |
@@ -104,6 +104,7 @@
 | 63 | 心跳超时阈值**必须 ≥ 3×探测周期**：心跳每周期才写一次，阈值 ≤ 周期时**健康节点会在下一次心跳到来前被对端判离线** → 互判/来回翻转/刷告警（实测：周期 30s + 阈值 10s，两健康节点互相把对方置 0）。显式值低于下限须**钳制并打 warning**（别静默忽略，见 #53 同型陷阱） |
 | 64 | 热配**探测周期变更必须 ≤5s 生效**：一次 `wait(interval)` 会让改小后的周期仍按旧的长节奏写心跳，从而触发 #63 的误判；**只分片但 deadline 在进入时定死是伪修复**（实测两次踩坑）→ 正确写法：每片 ≤5s 重读配置、按「距上次探测 ≥ 当前周期」判断结束 |
 | 73 | `UnboundLocalError`（引用未定义变量）让带 `cdr_*` 的**所有正常呼叫** HANGUP 处理中断 → 话单全 UNKNOWN + `fs_node_uuid=NULL`（reconcile 回填指纹）。**用 `pyflakes` 静态抓 undefined name**（✅ 已修，P2-a `bac057f` 引入） |
+| 74 | MySQL 8 的 `INSERT ... AS new ON DUPLICATE KEY UPDATE`：`new.<col>` 引用的列**必须出现在 INSERT 列清单里**，否则 `1054 Unknown column 'new.xxx'` → `_upsert_cdr_dict(ignore_existing=False)` 的 vals **必须全列宽** |
 
 ---
 
@@ -486,3 +487,24 @@
       而这类 bug 恰恰是动态测试最容易漏的。本次全仓仅此 1 处（其余为无害的 unused import）。
     - **判据**：`docker logs <gateway> | grep -c "cannot access local variable"` > 0；
       或 CDR 行 `fs_node_uuid IS NULL AND hangup_cause='UNKNOWN'`。
+
+74. **MySQL 8 行别名 upsert：`new.<col>` 引用的列必须出现在 INSERT 列清单里，否则 1054（2026-09-13 实测）**：
+    - **现象**：`_upsert_cdr_dict(vals)` 只传**部分列**时抛
+      `(1054, "Unknown column 'new.customer_id' in 'field list'")`；重试 3 次后返回 False，CDR 落不进库。
+    - **根因**：`esl_client._upsert_cdr_dict` 生成的 SQL 是
+      `INSERT INTO cdr (...) VALUES (...) AS new ON DUPLICATE KEY UPDATE <全列> = new.<全列>`
+      （`upd = {c: stmt.inserted[c] for c in cols if c not in _skip}`）。
+      MySQL 8.0.19+ 的行别名语法要求 `new.<col>` 指向的列**必须出现在 INSERT 的列清单中**；
+      未提供的列会让 MySQL 在解析 `new.<col>` 时报 1054（不是静默取默认值）。
+    - **为何以前没炸**：`_save_cdr` 一直传 **全列**
+      （`{c.name: getattr(cdr, c.name) for c in cdr.__table__.columns}`）；
+      而唯一传部分列的 `pre_insert_cdr` 走 `ignore_existing=True`，那时 `upd = {"id": Cdr.id}`，
+      **不含任何 `new.*` 引用**，所以不触发。
+    - **规则（重要）**：调用 `_upsert_cdr_dict(ignore_existing=False)` 时 **vals 必须全列宽**
+      —— 做法是先铺 `{c: None for c in cols}` 再覆盖，或由构建方显式补齐
+      （`cdr_truth.build_patch(..., full_cols=...)` 做的就是这件事；
+      `apply_xml_cdr` 强制要求传 `full_cols`，缺了直接 ValueError）。
+    - **易误判**：报错文本是 `Unknown column`，看起来像**表结构/迁移缺失**，实际是**本次 INSERT 没带那一列**
+      —— 先看 SQL 里的 INSERT 列清单，不要去看 DDL。
+    - **附带教训**：`1054` 属于 `OperationalError`（不是 `ProgrammingError`），
+      按异常类型归类会把排查方向带偏。

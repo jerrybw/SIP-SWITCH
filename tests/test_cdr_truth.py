@@ -27,6 +27,20 @@ FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "xml_cdr_a_leg.xml
 
 UUID = "0fad61b6-a704-4292-890a-0f2e43581721"
 
+#: 模拟 Cdr 表全列（不 import db.models，保持本文件在无 DB 环境下也能跑）。
+#: 真值是 `[c.name for c in Cdr.__table__.columns]`（端点侧传入）。
+FULL_COLS = [
+    "id", "uuid", "customer_id", "account_id", "business_id", "access_point_id",
+    "source_ip", "source_port", "dest_ip", "dest_port", "caller_type",
+    "gateway_id", "carrier_id", "caller_in", "callee_in", "caller_mid",
+    "callee_mid", "caller_out", "callee_out", "start_time", "ring_time",
+    "answer_time", "end_time", "talk_duration", "bill_unit", "bill_duration",
+    "hangup_cause", "sip_code", "sip_invite_failure_status", "reject_reason",
+    "hangup_direction", "switch_count", "switch_detail", "record_status",
+    "record_path", "cost", "rate_used", "cost_price", "cost_rate_used",
+    "cost_bill_unit", "profit", "billed", "fs_node_uuid", "created_at",
+]
+
 
 @pytest.fixture(scope="module")
 def xml_text():
@@ -248,6 +262,25 @@ def test_default_mode_is_reconcile_only():
     assert DEFAULT_MODE == "reconcile_only"
 
 
+def test_full_cols_widening(fields):
+    """★ MySQL 8 行别名要求：vals 必须补齐为**全列宽**，否则 upsert 报
+    `1054 Unknown column 'new.xxx'`（`upd` 是全列引用）。"""
+    p = build_patch(fields, None, billing_fn=None, full_cols=FULL_COLS)
+    assert p["widened"] is True
+    assert set(p["vals"]) == set(FULL_COLS) - {"id"}      # 全列（不含 id）
+    assert p["vals"]["uuid"] == UUID
+    assert p["vals"]["talk_duration"] == 21
+    # 未提供的列被补成 None（再由 _upsert_cdr_dict 的 NOT NULL 兜底填默认值）
+    assert p["vals"]["sip_invite_failure_status"] is None
+    assert p["vals"]["reject_reason"] is None
+
+
+def test_full_cols_widening_on_existing(fields):
+    p = build_patch(fields, _existing(cost=0), billing_fn=None, full_cols=FULL_COLS)
+    assert set(p["vals"]) == set(FULL_COLS) - {"id"}
+    assert "id" not in p["vals"]
+
+
 # ---------------------------------------------------------------------------
 # apply_xml_cdr —— 编排（全注入，无 DB）
 # ---------------------------------------------------------------------------
@@ -269,7 +302,7 @@ def test_apply_xml_cdr_wiring(xml_text):
         return True
 
     out = apply_xml_cdr(xml_text, row_loader=_row_loader, upsert_fn=_upsert_fn,
-                        enqueue_fn=_enqueue_fn,
+                        enqueue_fn=_enqueue_fn, full_cols=FULL_COLS,
                         billing_fn=_billing_stub([]), node_uuid="NODE-A")
 
     assert out["uuid"] == UUID
@@ -278,10 +311,18 @@ def test_apply_xml_cdr_wiring(xml_text):
     vals, preserve = upserts[0]
     assert vals["cost"] == Decimal("2.1000")
     assert preserve == ("created_at",)
+    assert set(vals) == set(FULL_COLS) - {"id"}          # 全列宽（防 1054）
+
+
+def test_apply_xml_cdr_requires_full_cols(xml_text):
+    with pytest.raises(ValueError):
+        apply_xml_cdr(xml_text, row_loader=lambda db, u: None,
+                      upsert_fn=lambda *a, **k: True,
+                      enqueue_fn=lambda uid, job: job(None))
 
 
 def test_apply_xml_cdr_rejects_bad_xml():
     with pytest.raises(ValueError):
         apply_xml_cdr("<nope/>", row_loader=lambda db, u: None,
-                      upsert_fn=lambda *a, **k: True,
+                      upsert_fn=lambda *a, **k: True, full_cols=FULL_COLS,
                       enqueue_fn=lambda uid, job: job(None))

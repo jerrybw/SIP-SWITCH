@@ -355,7 +355,8 @@ def _switch_detail_with_source(raw):
     return {"switch_detail": legs + [marker], "switch_count": max(len(legs) - 1, 0)}
 
 
-def build_patch(fields, existing, mode=DEFAULT_MODE, billing_fn=None, node_uuid=None):
+def build_patch(fields, existing, mode=DEFAULT_MODE, billing_fn=None, node_uuid=None,
+                full_cols=None):
     """**【核心】** 决定补什么、是否重算金额，产出「全列宽」vals 供 uuid 幂等 upsert。
 
     :param fields:     `parse_xml_cdr` 的输出
@@ -366,6 +367,12 @@ def build_patch(fields, existing, mode=DEFAULT_MODE, billing_fn=None, node_uuid=
                        business_id, customer_id, cost_price, cost_rate_used,
                        cost_bill_unit)`；**纯函数单测时可传 None**（则不算金额）
     :param node_uuid:  本节点 UUID（写 `fs_node_uuid`）；None 则沿用 existing
+    :param full_cols:  Cdr 表全列名。给了就把 vals **补齐为该列集**（缺的置 None）。
+                       **必须给**（`apply_xml_cdr` 会强制校验）：MySQL 8 的
+                       `INSERT ... AS new ON DUPLICATE KEY UPDATE` **要求 `new.<col>`
+                       引用的列出现在 INSERT 列清单里**，否则报
+                       `1054 Unknown column 'new.xxx'`。`_upsert_cdr_dict` 的
+                       `upd` 正是全列引用，故 `ignore_existing=False` 时 vals 必须全列宽。
 
     :return: `{"action", "vals", "preserve_cols", "reason", "fields"}`
              action ∈ `insert`（新建行）/ `recompute`（重算金额）/ `fill`（仅补缺失）
@@ -374,8 +381,15 @@ def build_patch(fields, existing, mode=DEFAULT_MODE, billing_fn=None, node_uuid=
         raise ValueError("fields 缺少 uuid")
 
     if existing is None:
-        return _patch_insert(fields, billing_fn, node_uuid)
-    return _patch_existing(fields, existing, mode, billing_fn)
+        patch = _patch_insert(fields, billing_fn, node_uuid)
+    else:
+        patch = _patch_existing(fields, existing, mode, billing_fn)
+
+    if full_cols:
+        cols = [c for c in full_cols if c != "id"]
+        patch["vals"] = {c: patch["vals"].get(c) for c in cols}
+        patch["widened"] = True
+    return patch
 
 
 def _patch_insert(fields, billing_fn, node_uuid):
@@ -542,7 +556,7 @@ def _apply_billing(vals, fields, talk, bill, billing_fn):
 # 3) 落库编排（DB 能力全部注入 —— 本模块不 import esl_client）
 # ---------------------------------------------------------------------------
 
-def apply_xml_cdr(xml_text, *, row_loader, upsert_fn, enqueue_fn,
+def apply_xml_cdr(xml_text, *, row_loader, upsert_fn, enqueue_fn, full_cols=None,
                   mode=DEFAULT_MODE, billing_fn=None, node_uuid=None,
                   preserve_supported=True):
     """解析 XML → 交给 cdr-writer 单线程队列 → 读现有行 → build_patch → upsert。
@@ -553,14 +567,18 @@ def apply_xml_cdr(xml_text, *, row_loader, upsert_fn, enqueue_fn,
     :param row_loader: `f(db, uuid) -> dict|None` 读该 uuid 的现有行（全列）
     :param upsert_fn:  `f(vals, db=db, preserve_cols=...)` = `esl_client._upsert_cdr_dict`
     :param enqueue_fn: `f(uuid, job)` = `esl_client._enqueue_cdr_job`
+    :param full_cols:  **必给** —— Cdr 表全列名（vals 要补齐为全列宽，
+                       否则 MySQL 报 1054，见 `build_patch` 说明）
     :return: `parse_xml_cdr` 的字段（供端点回显/日志）
     """
+    if not full_cols:
+        raise ValueError("apply_xml_cdr 必须传 full_cols（MySQL upsert 要求全列宽）")
     fields = parse_xml_cdr(xml_text)
 
     def _job(db):
         existing = row_loader(db, fields["uuid"])
-        patch = build_patch(fields, existing, mode=mode,
-                            billing_fn=billing_fn, node_uuid=node_uuid)
+        patch = build_patch(fields, existing, mode=mode, billing_fn=billing_fn,
+                            node_uuid=node_uuid, full_cols=full_cols)
         kwargs = {"db": db}
         if preserve_supported:
             kwargs["preserve_cols"] = patch.get("preserve_cols") or ()
