@@ -58,19 +58,19 @@
 
 > 已知限制：心跳异常**仅打日志，不接外部告警**（`heartbeat.py:13`）。
 
-## 4. M3 Web 管理端 — 5 完成 / 2 部分
+## 4. M3 Web 管理端 — 7 完成
 
 | 编号 | 任务 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| T-301 | 登录鉴权 + 角色 + 操作日志 | ⚠️ | ✅ `/login` `/logout` `/me`；**❌ `sys_user.role` 建字段但无校验（只读可绕过）**；**❌ `operation_log` 建表无写入**。2026-09-12 安全加固（zcode，Co-authored-by 归因）：① `/fs/*` xml_curl 回调 HTTP Basic 认证（fail-closed）+ `/fs/directory` 明文泄露收敛/a1-hash 下发（`api/fs_auth.py`，凭据 `deploy.sh` 两侧同源、存量增量补配，真实 REGISTER 摘要认证 E2E 闭环）；② 口令哈希升级版本化 PBKDF2 + 恒时序比对（`core/pw_hash.py`，登录兼容遗留 sha256 平滑升级，`tools/hash_password.py` CLI）；③ CSRF 纵深防御：cookie 面写操作同源校验（`api/csrf.py`，豁免 Authorization/`/fs/*`/login/logout；⚠️ 裸 curl cookie 脚本写 `/api/*` 将 403，Sec-Fetch-Site 放宽口径待拍板） |
+| T-301 | 登录鉴权 + 角色 + 操作日志 | ✅ | ✅ `/login` `/logout` `/me`；**✅ `sys_user.role` 校验已落地**：`api/authz.py` `ENFORCE_ROLE=True` + `require_role()` + viewer 全站只读守卫；**⚠️ 仅剩「自定义角色」未做（Phase 2，2026-09-14 已派 zcode）**；**✅ `operation_log` 已落写入**（`api/oplog.py` `record_op()` + `oplog_middleware` HTTP 写操作自动埋点；**2026-09-14 回填：文档此前描述过时**）。2026-09-12 安全加固（zcode，Co-authored-by 归因）：① `/fs/*` xml_curl 回调 HTTP Basic 认证（fail-closed）+ `/fs/directory` 明文泄露收敛/a1-hash 下发（`api/fs_auth.py`，凭据 `deploy.sh` 两侧同源、存量增量补配，真实 REGISTER 摘要认证 E2E 闭环）；② 口令哈希升级版本化 PBKDF2 + 恒时序比对（`core/pw_hash.py`，登录兼容遗留 sha256 平滑升级，`tools/hash_password.py` CLI）；③ CSRF 纵深防御：cookie 面写操作同源校验（`api/csrf.py`，豁免 Authorization/`/fs/*`/login/logout；⚠️ 裸 curl cookie 脚本写 `/api/*` 将 403，Sec-Fetch-Site 放宽口径待拍板） |
 | T-302 | 接入管理页 | ✅ | `/{entity}` 通用 CRUD + `/access-points/{id}/gateway-policies` |
 | T-303 | 落地管理页 | ✅ | `gateway` / `carrier` CRUD |
 | T-304 | 路由配置页 | ✅ | `prefix_route` |
 | T-305 | 实时监控仪表盘 | ✅ | `/monitor/summary` + `/api/stats/concurrency` |
-| T-306 | CDR 查询/导出/录音下载 | ⚠️ | ✅ 查询 `/cdr` `/cdr/{uuid}` `/api/cdr`；**✅ 录音播放/下载（#70，2026-09-11）**：`GET /api/cdr/{uuid}/recording`（文件流+Range 206，支持 `?download=1`）+ `/recording/meta`；录音改 URI 抽象 `local://<node_uuid>/<file>`，共享卷 `./data/recordings`；**❌ CDR 导出未做** |
+| T-306 | CDR 查询/导出/录音下载 | ✅ | ✅ 查询 `/cdr` `/cdr/{uuid}` `/api/cdr`；**✅ 录音播放/下载（#70，2026-09-11）**：`GET /api/cdr/{uuid}/recording`（文件流+Range 206，支持 `?download=1`）+ `/recording/meta`；录音改 URI 抽象 `local://<node_uuid>/<file>`，共享卷 `./data/recordings`；**✅ CDR 导出已落地**（`GET /api/cdr/export`，`src/api/cdr_export.py`；**2026-09-14 回填：文档此前描述过时**） |
 | T-307 | 系统设置 | ✅ | `/sys-config` + `system_setting` |
 
-**M3 真实缺口**：角色校验（安全）· 操作日志 · CDR 导出 ｜ **录音下载/播放已闭环（#70，2026-09-11）**
+**M3 真实缺口**：~~角色校验 · 操作日志 · CDR 导出~~ **三项均已闭环**（2026-09-14 实地核实回填）；**当前唯一缺口 = 自定义角色 + 权限矩阵（Phase 2，2026-09-14 已派 zcode）** ｜ 录音下载/播放已闭环（#70）
 
 ## 5. 二期计费（需求口径） — 2 完成 / 1 部分 / 1 未开始
 
@@ -164,10 +164,10 @@
 | 2 | ~~二期计费提前完成是否有意决策~~ **已拍板 2026-09-11：算「待评审」**（代码超前于计划，评审通过后才记「已完成」） | 进度口径=待评审 |
 | 3 | M4 压测是否准备云上规格（FS 16C32G + 同地域压测机） | M4 能否启动 |
 | 4 | ~~P2-c 打标字段（`gw_overflowed` + 原始首选 `gw_id`）落新列 or 扩展字段~~ **已拍板 2026-09-10：走扩展字段，复用 `switch_detail`**（不加列） | ✅ 已落地 |
-| 5 | 生产策略：继续"等 dev 单机+多机成熟后按成熟方案重部署" | 当前决策=等重部署 |
+| 5 | ~~生产策略~~ **已拍板 2026-09-14**：在 **Lighthouse 建「预生产环境」** —— **清掉原直接部署的 switch/网关，改 docker 部署**：2×FS + 1 MySQL + 1 Redis + 1 sipp-reg 测试桩。⚠️ 执行前须先备份存量配置/DB/录音并二次确认（不可逆） | ✅ 已定，待出部署方案评审后执行 |
 | 6 | ~~`concurrent_limit_global` 无配置入口（全局并发限制恒 0）~~ **已解决 2026-09-13**：config 顶层键 + `_apply_defaults` 兜底（`c2ad669`），0=不限，容量属性不热更 | ✅ 已落地（P2-收口 G1） |
-| 7 | 多副本 CDR 幂等（选主 vs 幂等键） | 网关多副本部署时 CDR 去重 / 防重复计费 |
-| 8 | **前端 gateway 状态跨账号不一致**（admin 停用后换账号仍见"启用"，F5 后同步） | 疑前端缓存/乐观更新，**待定位修复**（2026-09-13 记录，未动代码） |
+| 7 | ~~多副本 CDR 幂等（选主 vs 幂等键）~~ **已拍板 2026-09-14：走「幂等键」**（不引入选主，无额外组件） | ✅ 已定；实施待多副本部署时落地 |
+| 8 | **前端 gateway 状态跨账号不一致**（admin 停用后换账号仍见"启用"，F5 后同步） | 疑前端缓存/乐观更新；**2026-09-14 拍板：派 zcode 修复**（与 M3 Phase 2 串行，避免并行冲突前端） |
 
 ---
 
