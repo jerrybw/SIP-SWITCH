@@ -1605,9 +1605,9 @@ function renderUsers(key, st) {
     '<div class="muted" style="margin-bottom:8px;font-size:12px">' +
     '角色三档：viewer 只读（写操作全站 403）/ admin 业务管理 / super 用户管理+系统设置。' +
     '守卫：最后一个启用的 super 不可降级/停用/删除；不可停用/降级/删除自己。</div>' +
-    '<table class="tbl" id="usr-tbl"><thead><tr>' +
+    '<div class="table-scroll"><table id="usr-tbl"><thead><tr>' +
     '<th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th>' +
-    '</tr></thead><tbody></tbody></table>';
+    '</tr></thead><tbody></tbody></table></div>';
   api('/api/users?page=' + st.page + '&page_size=' + st.page_size).then(function (d) {
     var tb = document.querySelector('#usr-tbl tbody');
     tb.innerHTML = '';
@@ -1618,7 +1618,7 @@ function renderUsers(key, st) {
         '<td>' + escHtml(u.username) + (u.username === window._adminUser ? ' <span class="muted">（我）</span>' : '') + '</td>' +
         '<td>' + roleTxt(u.role) + '</td>' +
         '<td>' + (u.status === 1 ? '<span class="ok">启用</span>' : '<span class="err">停用</span>') + '</td>' +
-        '<td>' + escHtml(u.created_at || '') + '</td>' +
+        '<td>' + (fmtBJ(u.created_at) || '—') + '</td>' +
         '<td style="white-space:nowrap">' +
         '<button class="btn btn-sm" data-act="edit" data-id="' + u.id + '">编辑</button> ' +
         '<button class="btn btn-sm" data-act="reset" data-id="' + u.id + '">重置密码</button> ' +
@@ -1727,9 +1727,9 @@ function renderOplogs(key, st) {
     '<select id="oplog-act" class="pager-input"><option value="">全部动作</option>' +
     OPLOG_ACTIONS.map(function (a) { return '<option value="' + a.v + '"' + (st.action === a.v ? ' selected' : '') + '>' + a.t + '</option>'; }).join('') +
     '</select> <button class="btn btn-sm" id="oplog-go">查询</button></div>' +
-    '<table class="tbl" id="oplog-tbl"><thead><tr>' +
+    '<div class="table-scroll"><table id="oplog-tbl"><thead><tr>' +
     '<th>ID</th><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>详情</th>' +
-    '</tr></thead><tbody></tbody></table>';
+    '</tr></thead><tbody></tbody></table></div>';
   var go = function () {
     st.operator = document.getElementById('oplog-op').value.trim();
     st.action = document.getElementById('oplog-act').value;
@@ -1751,7 +1751,7 @@ function loadOplogs(key, st) {
       var tr = document.createElement('tr');
       tr.innerHTML =
         '<td>' + r.id + '</td>' +
-        '<td>' + escHtml(r.created_at || '') + '</td>' +
+        '<td>' + (fmtBJ(r.created_at) || '—') + '</td>' +
         '<td>' + escHtml(r.operator) + '</td>' +
         '<td>' + escHtml(r.action) + '</td>' +
         '<td title="' + escHtml(r.object_id || '') + '">' + escHtml(r.object_type) + '</td>' +

@@ -12,9 +12,9 @@
 """
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from api.authz import require_role, ROLE_NAMES
@@ -53,9 +53,17 @@ class PasswordReset(BaseModel):
 
 
 @router.get("", dependencies=[Depends(require_role("super"))])
-def list_users(db: Session = Depends(get_db)):
-    rows = db.scalars(select(SysUser).order_by(SysUser.id)).all()
-    return {"items": [_user_out(u) for u in rows]}
+def list_users(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
+               db: Session = Depends(get_db)):
+    """分页口径与 operation-logs 一致（total/total_pages/offset+limit，id 正序）。"""
+    total = db.scalar(select(func.count()).select_from(SysUser)) or 0
+    total_pages = (total + page_size - 1) // page_size if total else 1
+    if page > total_pages:
+        page = total_pages
+    rows = db.scalars(select(SysUser).order_by(SysUser.id)
+                      .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [_user_out(u) for u in rows], "page": page,
+            "page_size": page_size, "total": total, "total_pages": total_pages}
 
 
 @router.post("", status_code=201, dependencies=[Depends(require_role("super"))])

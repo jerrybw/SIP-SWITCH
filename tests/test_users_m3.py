@@ -353,8 +353,25 @@ def test_change_own_password_requires_old(super_env):
 # --- list / shape ---
 
 def test_list_users(super_env):
-    r = list_users(db=super_env)
+    # 直调端点：Query() 默认值不经 FastAPI 解析，分页参数显式传（与 oplog 用例同口径）
+    r = list_users(page=1, page_size=50, db=super_env)
     assert [i["username"] for i in r["items"]] == ["root-super"]
+    assert r["total"] == 1 and r["total_pages"] == 1 and r["page"] == 1
+
+
+def test_list_users_pagination(super_env):
+    """分页口径与 operation-logs 一致：total/total_pages/offset+limit。"""
+    db = super_env
+    for i in range(5):
+        _mk_user(db, "u%d" % i)
+    r1 = list_users(page=1, page_size=3, db=db)
+    assert r1["total"] == 6 and r1["total_pages"] == 2
+    assert [i["username"] for i in r1["items"]] == ["root-super", "u0", "u1"]
+    r2 = list_users(page=2, page_size=3, db=db)
+    assert [i["username"] for i in r2["items"]] == ["u2", "u3", "u4"]
+    # 越界回落最后一页
+    r9 = list_users(page=9, page_size=3, db=db)
+    assert r9["page"] == 2 and len(r9["items"]) == 3
 
 
 def test_user_out_shape(db_session):
