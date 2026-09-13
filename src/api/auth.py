@@ -121,7 +121,7 @@ def _login_check_db(user: str, pw: str) -> bool:
     try:
         from db.session import SessionLocal
         from db.models import SysUser
-        from sqlalchemy import select
+        from sqlalchemy import select, func
         db = SessionLocal()
         try:
             row = db.scalar(select(SysUser).where(
@@ -129,7 +129,8 @@ def _login_check_db(user: str, pw: str) -> bool:
             if row is not None:
                 return _verify_pw(pw, row.password_hash or "",
                                   legacy_salt=(_cfg().get("password_salt") or ""))
-            n = db.scalar(select(SysUser).count()) or 0
+            # SQLAlchemy 2.0：Select 无 .count()（Query 时代 API 已移除），走 func.count
+            n = db.scalar(select(func.count()).select_from(SysUser)) or 0
             if n == 0:
                 print("[auth] sys_user 空表 -> bootstrap 回落 config admin（重启后将按 "
                       "config 种子 super 用户；之后请走系统改密）", flush=True)

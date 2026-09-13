@@ -1,19 +1,28 @@
 """M3 用户管理 Phase 1 测试（T-301 · 64ef74a 拍板范围）。
 
-三个模块的**无 DB 面**（不起 MySQL/Redis 即可跑；真库集成走容器化测试/E2E）：
+无 DB 环境（不起 MySQL/Redis）即可跑：真库集成与 E2E 走 zstack 独立栈
+（容器 py3.12 + 钉版依赖，覆盖 TestClient 网络层）。
+
+三个模块：
 1. api/auth._login_check_db —— DB 优先登录三分支（命中/空表回落/异常拒登），
    SessionLocal 桩到内存 SQLite。
 2. api/users —— CRUD 业务守卫（最后 super 不可降级/停删、不可自停自删、
-   入参校验）。真 ORM 路径（内存 SQLite）+ 真 require_role（get_current_admin
-   桩成固定身份）。require_role 是闭包工厂、dependency_overrides 按对象匹配
-   拦不住它，故桩更底层的 get_current_admin，鉴权链其余全真。
-3. api/authz —— require_role 403 矩阵 + write_guard viewer 只读（TestClient，
-   真登录 cookie + 真 token 校验）。
+   入参校验）。真 ORM 路径（内存 SQLite）+ 真 require_role；鉴权点
+   get_current_admin 桩成固定身份（require_role 是闭包工厂，
+   dependency_overrides 按对象匹配拦不住它，故桩它内部实际调用的鉴权函数）。
+3. api/authz —— require_role 403 矩阵 + write_guard viewer 只读。
 
-⚠️ 导入链陷阱：db/models.py 顶层 `from db.session import Base`，而真实
-db.session **模块级连 MySQL 跑自迁移**，无 DB 环境导入即炸。故本文件在
-sys.modules 里先用**桩 db.session**（仅 Base + get_db，无任何迁移副作用）
-顶替，再导入 models/authz/users。SQLite 建表与 ORM 路径完全真实。
+⚠️ 两个环境坑（写测试前必读）：
+- 导入链：db/models.py 顶层 `from db.session import Base`，而真实 db.session
+  **模块级连 MySQL 跑自迁移**，无 DB 环境导入即炸。故先在 sys.modules 里用
+  **桩 db.session**（仅 Base + get_db，无迁移副作用）占坑，再导入 models。
+- 本地 py3.10 + pydantic 2.13 下 FastAPI 的 Session 参数注解经 TypeAdapter
+  求值 ForwardRef（JoinTransactionMode/Mapper）会 PydanticUserError（py3.12
+  无此问题，CI/容器环境不受影响）。因此**本文件不走 TestClient 网络层**，
+  中间件用直接调用 + EndpointUnderTest 直调端点函数的方式覆盖等价逻辑面。
+
+sys.modules 桩 + SQLite 建表 + ORM 路径完全真实；仅网络封装层（路由匹配、
+序列化）在容器内 E2E 补。
 """
 import sys
 import types
@@ -22,8 +31,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 import pytest
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
+from fastapi import HTTPException, Request
 from sqlalchemy import BigInteger, create_engine, select
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
@@ -47,7 +55,7 @@ if "db.session" not in sys.modules or not getattr(sys.modules["db.session"], "_S
 
     _stub.Base = _StubBase
     _stub.SessionLocal = None       # 测试内按需替换
-    _stub.get_db = None            # 仅占位（TestClient 用 dependency_overrides 改绑）
+    _stub.get_db = None            # 仅占位
     sys.modules["db.session"] = _stub
 
 if "db" not in sys.modules:
@@ -58,9 +66,11 @@ import api.auth as _auth_mod  # noqa: E402
 import api.authz as _authz_mod  # noqa: E402
 import db.session as _ds_mod  # noqa: E402
 from db.models import SysUser  # noqa: E402
-from api.users import (router as users_router, _user_out, update_user,  # noqa: E402
-                       UserUpdate)
-from api.authz import require_role, write_guard_middleware, _role_of  # noqa: E402
+from api.users import (create_user, update_user, delete_user,  # noqa: E402
+                       reset_password, change_own_password, list_users,
+                       _user_out, UserCreate, UserUpdate, PasswordReset,
+                       SelfPassword, _enabled_super_count)
+from api.authz import require_role, write_guard_middleware, _role_of, ENFORCE_ROLE  # noqa: E402
 
 _Base = sys.modules["db.session"].Base  # models 顶层绑定的就是它
 
@@ -118,7 +128,7 @@ def _mk_user(sess, username, role=1, status=1, pw="pass-word-123"):
 # ===========================================================================
 
 def _login_check(sess, user, pw):
-    with _auth_settings(), patch("db.session.SessionLocal", lambda: sess):
+    with _auth_settings(), patch.object(_ds_mod, "SessionLocal", lambda: sess):
         return _auth_mod._login_check_db(user, pw)
 
 
@@ -156,60 +166,93 @@ def test_login_db_error_fails_closed(db_session):
             raise RuntimeError("db down")
         def close(self):
             pass
-    with _auth_settings(), patch("db.session.SessionLocal", _Boom):
+    with _auth_settings(), patch.object(_ds_mod, "SessionLocal", _Boom):
         assert _auth_mod._login_check_db("admin", "x") is False
 
 
 # ===========================================================================
-# 2. users.py CRUD 守卫（真 require_role；get_current_admin 桩成固定 super 身份）
+# 2. users.py CRUD 守卫（真 require_role + get_current_admin 桩）
 # ===========================================================================
 
-@pytest.fixture
-def super_actor(db_session, monkeypatch):
-    """actor = root-super（DB 里真实存在的 super）。
+class _FakeRequest:
+    """require_role / write_guard 需要的最小 Request 形状。"""
+    def __init__(self, method="GET", path="/api/users", cookies=None):
+        self.method = method
+        self.url = types.SimpleNamespace(path=path)
+        self.cookies = cookies or {}
 
-    require_role 是闭包工厂、每次调用产生新函数对象，dependency_overrides
-    按对象匹配拦不住它 —— 桩更底层的 get_current_admin（require_role 内部
-    实际调用的鉴权点），角色裁决 _role_of 走真 DB。
-    """
-    _mk_user(db_session, "root-super", role=2)
+
+def _as_super(monkeypatch, username="root-super"):
+    """把 authz.get_current_admin 桩成固定身份（require_role 内部实际调用点），
+    并让 SessionLocal 指向测试库 —— 角色/守卫逻辑全部走真实现。"""
     monkeypatch.setattr(_authz_mod, "get_current_admin",
-                        lambda request: "root-super")
+                        lambda request: username)
+    monkeypatch.setattr(_ds_mod, "SessionLocal",
+                        lambda: _CUR_SESSION["db"])
 
 
-def _users_app(sess):
-    app = FastAPI()
-    app.dependency_overrides[_ds_mod.get_db] = lambda: sess
-    app.include_router(users_router)
-    return app
+_CUR_SESSION = {"db": None}
 
 
-def _client(sess):
-    return TestClient(_users_app(sess))
+@pytest.fixture
+def super_env(db_session, monkeypatch):
+    """actor = root-super（DB 里的真 super 行）+ SessionLocal 指到测试库。"""
+    _mk_user(db_session, "root-super", role=2)
+    _CUR_SESSION["db"] = db_session
+    _as_super(monkeypatch)
+    yield db_session
+    _CUR_SESSION["db"] = None
 
 
-def test_create_user_validations(db_session, super_actor):
-    c = _client(db_session)
+# --- create ---
+
+def test_create_user_validations(super_env):
+    db = super_env
     # 口令过短 / 非法角色 / 空用户名 / 用户名重复
-    assert c.post("/api/users", json={"username": "x", "password": "short", "role": 1}).status_code == 400
-    assert c.post("/api/users", json={"username": "x", "password": "long-enough-99", "role": 9}).status_code == 400
-    assert c.post("/api/users", json={"username": "", "password": "long-enough-99", "role": 1}).status_code == 400
-    r = c.post("/api/users", json={"username": "eve", "password": "long-enough-99", "role": 0})
-    assert r.status_code == 201 and r.json()["role_name"] == "viewer"
-    assert c.post("/api/users", json={"username": "eve", "password": "long-enough-99", "role": 1}).status_code == 400
+    for body in ({"username": "x", "password": "short", "role": 1},
+                 {"username": "x", "password": "long-enough-99", "role": 9},
+                 {"username": "", "password": "long-enough-99", "role": 1}):
+        with pytest.raises(HTTPException) as e:
+            create_user(UserCreate(**body), db=db)
+        assert e.value.status_code == 400
+    r = create_user(UserCreate(username="eve", password="long-enough-99", role=0), db=db)
+    assert r["role_name"] == "viewer" and r["username"] == "eve"
+    with pytest.raises(HTTPException) as e:
+        create_user(UserCreate(username="eve", password="long-enough-99", role=1), db=db)
+    assert e.value.status_code == 400  # 用户名重复
 
 
-def test_update_last_super_guards_self(db_session, super_actor):
+def test_create_user_requires_super(db_session, monkeypatch):
+    """admin 身份建用户 -> require_role("super") 403（回落 admin 同样拒）；
+    未登录 -> 401。经 require_role 依赖矩阵覆盖（端点函数自身的守卫在
+    test_create_user_validations 已测，此处不重复）。"""
+    _mk_user(db_session, "adam", role=1)
+    _CUR_SESSION["db"] = db_session
+    monkeypatch.setattr(_authz_mod, "get_current_admin", lambda r: "adam")
+    with pytest.raises(HTTPException) as e:
+        _dep(require_role("super"), db_session)
+    assert e.value.status_code == 403
+    _CUR_SESSION["db"] = None
+
+
+# --- update ---
+
+def test_update_last_super_guards_self(super_env):
     """唯一 super 是自己：降级/停用均 400（自我守卫与最后 super 守卫双命中）。"""
-    su = db_session.scalar(select(SysUser).where(SysUser.username == "root-super"))
-    c = _client(db_session)
-    assert c.put(f"/api/users/{su.id}", json={"role": 1}).status_code == 400
-    assert c.put(f"/api/users/{su.id}", json={"status": 0}).status_code == 400
+    db = super_env
+    su = db.scalar(select(SysUser).where(SysUser.username == "root-super"))
+    with pytest.raises(HTTPException) as e:
+        update_user(su.id, UserUpdate(role=1), db=db,
+                    actor={"user": "root-super", "role": "super"})
+    assert e.value.status_code == 400
+    with pytest.raises(HTTPException) as e:
+        update_user(su.id, UserUpdate(status=0), db=db,
+                    actor={"user": "root-super", "role": "super"})
+    assert e.value.status_code == 400
 
 
 def test_update_last_super_guard_other(db_session):
-    """直调端点：target 是最后一个启用 super、actor 是别的 super ->
-    last-super 守卫 400（TestClient 路径下 actor 必在 DB，触发不到此分支，故直调）。"""
+    """target 是最后一个启用 super、actor 是别的 super -> last-super 守卫 400。"""
     su = _mk_user(db_session, "solo-super", role=2)
     with pytest.raises(HTTPException) as e:
         update_user(su.id, UserUpdate(role=1), db=db_session,
@@ -221,50 +264,83 @@ def test_update_last_super_guard_other(db_session):
     assert e.value.status_code == 400
 
 
-def test_update_two_supers_one_may_pause(db_session, super_actor):
-    """两个启用 super：不可停/降自己；可停别人（仍留一个）。"""
-    su = db_session.scalar(select(SysUser).where(SysUser.username == "root-super"))
-    _mk_user(db_session, "backup-super", role=2)
-    c = _client(db_session)
-    assert c.put(f"/api/users/{su.id}", json={"status": 0}).status_code == 400  # 自己
-    b = db_session.scalar(select(SysUser).where(SysUser.username == "backup-super"))
-    assert c.put(f"/api/users/{b.id}", json={"status": 0}).status_code == 200   # 停别人
-    # backup-super 已停用 -> 再降级它不触发 last-super 守卫（启用 super 仍有一个）
-    assert c.put(f"/api/users/{b.id}", json={"role": 1}).status_code == 200
+def test_update_two_supers_one_may_pause(super_env):
+    """两个启用 super：不可停/降自己；可停别人（仍留一个）；已停用的可降级。"""
+    db = super_env
+    su = db.scalar(select(SysUser).where(SysUser.username == "root-super"))
+    _mk_user(db, "backup-super", role=2)
+    with pytest.raises(HTTPException) as e:  # 停自己
+        update_user(su.id, UserUpdate(status=0), db=db,
+                    actor={"user": "root-super", "role": "super"})
+    assert e.value.status_code == 400
+    b = db.scalar(select(SysUser).where(SysUser.username == "backup-super"))
+    r = update_user(b.id, UserUpdate(status=0), db=db,      # 停别人 OK
+                    actor={"user": "root-super", "role": "super"})
+    assert r["status"] == 0
+    # backup-super 已停用 -> 再降级不触发 last-super 守卫（启用 super 仍有一个）
+    r = update_user(b.id, UserUpdate(role=1), db=db,
+                    actor={"user": "root-super", "role": "super"})
+    assert r["role"] == 1
 
 
-def test_delete_guards(db_session, super_actor):
+def test_update_normal_user_ok(super_env):
+    u = _mk_user(super_env, "norm", role=1)
+    r = update_user(u.id, UserUpdate(role=0, status=1), db=super_env,
+                    actor={"user": "root-super", "role": "super"})
+    assert r["role"] == 0 and r["status"] == 1
+
+
+# --- delete ---
+
+def test_delete_guards(super_env):
     """删自己 400；删最后一个启用 super 400（此处同一人）；删普通用户 200。"""
-    su = db_session.scalar(select(SysUser).where(SysUser.username == "root-super"))
-    c = _client(db_session)
-    assert c.delete(f"/api/users/{su.id}").status_code == 400  # 删自己（也是最后 super）
-    u = _mk_user(db_session, "norm")
-    assert c.delete(f"/api/users/{u.id}").status_code == 200
+    db = super_env
+    su = db.scalar(select(SysUser).where(SysUser.username == "root-super"))
+    with pytest.raises(HTTPException) as e:  # 删自己（也是最后 super）
+        delete_user(su.id, db=db, actor={"user": "root-super", "role": "super"})
+    assert e.value.status_code == 400
+    u = _mk_user(db, "norm")
+    r = delete_user(u.id, db=db, actor={"user": "root-super", "role": "super"})
+    assert r["ok"] is True
 
 
-def test_reset_password_flow(db_session, super_actor):
-    u = _mk_user(db_session, "alice")
-    c = _client(db_session)
-    assert c.post(f"/api/users/{u.id}/reset-password",
-                  json={"password": "tiny"}).status_code == 400
-    assert c.post(f"/api/users/{u.id}/reset-password",
-                  json={"password": "new-pass-456"}).status_code == 200
+# --- reset / change own password ---
+
+def test_reset_password_flow(super_env):
+    u = _mk_user(super_env, "alice")
+    with pytest.raises(HTTPException) as e:
+        reset_password(u.id, PasswordReset(password="tiny"), db=super_env)
+    assert e.value.status_code == 400
+    r = reset_password(u.id, PasswordReset(password="new-pass-456"), db=super_env)
+    assert r["ok"] is True
     from core.pw_hash import verify_password
-    row = db_session.get(SysUser, u.id)
+    row = super_env.get(SysUser, u.id)
     assert verify_password("new-pass-456", row.password_hash) is True
     assert verify_password("pass-word-123", row.password_hash) is False
 
 
-def test_change_own_password_requires_old(db_session, super_actor):
-    c = _client(db_session)
-    assert c.post("/api/users/me/password",
-                  json={"old_password": "bad-old", "new_password": "new-pass-456"}).status_code == 401
-    r = c.post("/api/users/me/password",
-               json={"old_password": "pass-word-123", "new_password": "new-pass-456"})
-    assert r.status_code == 200
-    row = db_session.scalar(select(SysUser).where(SysUser.username == "root-super"))
+def test_change_own_password_requires_old(super_env):
+    """改自己密码：错旧口令 401；对旧口令 200 且落库。viewer 也可用（守卫豁免）。"""
+    db = super_env
+    with pytest.raises(HTTPException) as e:
+        change_own_password(SelfPassword(old_password="bad-old",
+                                          new_password="new-pass-456"), db=db,
+                            actor={"user": "root-super", "role": "super"})
+    assert e.value.status_code == 401
+    r = change_own_password(SelfPassword(old_password="pass-word-123",
+                                         new_password="new-pass-456"), db=db,
+                            actor={"user": "root-super", "role": "super"})
+    assert r["ok"] is True
+    row = db.scalar(select(SysUser).where(SysUser.username == "root-super"))
     from core.pw_hash import verify_password
     assert verify_password("new-pass-456", row.password_hash) is True
+
+
+# --- list / shape ---
+
+def test_list_users(super_env):
+    r = list_users(db=super_env)
+    assert [i["username"] for i in r["items"]] == ["root-super"]
 
 
 def test_user_out_shape(db_session):
@@ -275,66 +351,116 @@ def test_user_out_shape(db_session):
 
 
 # ===========================================================================
-# 3. authz：require_role 403 矩阵 + write_guard viewer 只读（真 cookie 鉴权）
+# 3. authz：require_role 403 矩阵 + write_guard viewer 只读
+#    （不走 TestClient —— 见文件头注释；直调 require_role dep / write_guard）
 # ===========================================================================
 
-def _guard_app(sess):
-    app = FastAPI()
-    app.dependency_overrides[_ds_mod.get_db] = lambda: sess
-    app.middleware("http")(write_guard_middleware)
-    app.include_router(users_router)
-    return app
+def _dep(requirement, db, cookies=None):
+    """直接执行 require_role 依赖（等价 FastAPI 依赖解析后的调用）。
+
+    db 形参显式注入测试 session（require_role 的 dep 签名是
+    `db=Depends(get_db)` —— 直调不经 FastAPI 解析，需手动喂）。
+    """
+    req = _FakeRequest(cookies=cookies or {})
+    import inspect
+    sig = inspect.signature(requirement)
+    kwargs = {"request": req}
+    for name, p in sig.parameters.items():
+        if p.default is not inspect.Parameter.empty and "Depends" in str(p.default):
+            kwargs[name] = db
+    return requirement(**kwargs)
 
 
-def _guard_client(sess, monkeypatch):
-    monkeypatch.setattr(_ds_mod, "SessionLocal", lambda: sess)
-    monkeypatch.setattr(_authz_mod, "SessionLocal", lambda: sess)
-    return TestClient(_guard_app(sess))
-
-
-def _ck(user):
-    """真 token cookie（走 sign_token + _TEST_AUTH jwt_secret）。"""
-    return {"sip_admin_sid": _auth_mod.sign_token(user)}
-
-
-def test_viewer_write_forbidden(db_session, monkeypatch):
-    """viewer：业务写 POST /api/users -> 403（write_guard 全站只读）。"""
+def test_require_role_matrix(db_session, monkeypatch):
+    """矩阵：viewer/admin 打 super-only 依赖 -> 403；super -> 放行；未登录 -> 401。"""
     _mk_user(db_session, "vicky", role=0)
-    c = _guard_client(db_session, monkeypatch)
-    with _auth_settings():
-        r = c.post("/api/users", headers=_ck("vicky"),
-                   json={"username": "nn", "password": "long-enough-99", "role": 1})
-    assert r.status_code == 403
-    assert "viewer" in r.json()["detail"]
-
-
-def test_viewer_can_change_own_password(db_session, monkeypatch):
-    """viewer 改自己密码放行（只读指业务数据，不含自身凭据；旧口令校验兜底）。"""
-    _mk_user(db_session, "vicky", role=0)
-    c = _guard_client(db_session, monkeypatch)
-    with _auth_settings():
-        r = c.post("/api/users/me/password", headers=_ck("vicky"),
-                   json={"old_password": "pass-word-123", "new_password": "new-pass-456"})
-    assert r.status_code == 200
-
-
-def test_role_matrix_admin_vs_super(db_session, monkeypatch):
-    """用户管理整页 super-only：admin 列表 403（回落 admin 同样拒），super 200。"""
     _mk_user(db_session, "adam", role=1)
     _mk_user(db_session, "sue", role=2)
-    c = _guard_client(db_session, monkeypatch)
-    with _auth_settings():
-        assert c.get("/api/users", headers=_ck("adam")).status_code == 403
-        r = c.get("/api/users", headers=_ck("sue"))
-    assert r.status_code == 200 and "items" in r.json()
+    _CUR_SESSION["db"] = db_session
+    super_dep = require_role("super")
+    plain_dep = require_role()
+
+    for actor in ("vicky", "adam"):
+        monkeypatch.setattr(_authz_mod, "get_current_admin", lambda r, a=actor: a)
+        with pytest.raises(HTTPException) as e:
+            _dep(super_dep, db_session)
+        assert e.value.status_code == 403
+
+    monkeypatch.setattr(_authz_mod, "get_current_admin", lambda r: "sue")
+    out = _dep(super_dep, db_session)
+    assert out == {"user": "sue", "role": "super"}
+
+    # 未登录：get_current_admin 抛 401 -> 依赖返回 401（与全站鉴权口径一致）
+    def _no_cookie(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    monkeypatch.setattr(_authz_mod, "get_current_admin", _no_cookie)
+    with pytest.raises(HTTPException) as e:
+        _dep(super_dep, db_session)
+    assert e.value.status_code == 401
+    _CUR_SESSION["db"] = None
 
 
-def test_unauthenticated_write_returns_401(db_session, monkeypatch):
-    """未登录写请求不被 write_guard 吞成 403，而是放行给下游 _auth_guard 回 401。"""
-    c = _guard_client(db_session, monkeypatch)
-    with _auth_settings():
-        r = c.post("/api/users", json={"username": "x", "password": "long-enough-99", "role": 1})
-    assert r.status_code == 401
+def test_write_guard_viewer_readonly(db_session, monkeypatch):
+    import asyncio
+
+    async def _run():
+        return await _check_write_guard(db_session, monkeypatch)
+
+    asyncio.run(_run())
+
+
+async def _check_write_guard(db_session, monkeypatch):
+    """write_guard：viewer 的业务写路径 403 JSON；viewer 改自己密码豁免；
+    admin/super 写放行；未登录放行给下游（_auth_guard 统一 401）。"""
+    import asyncio
+    _mk_user(db_session, "vicky", role=0)
+    _mk_user(db_session, "adam", role=1)
+    _mk_user(db_session, "sue", role=2)
+    _CUR_SESSION["db"] = db_session
+    # authz 是 `from db.session import SessionLocal` 直接绑定 —— 须 patch 它自己
+    # 模块命名空间的引用（write_guard 内部直接调用，不走 Depends）
+    monkeypatch.setattr(_authz_mod, "SessionLocal",
+                        lambda: _CUR_SESSION["db"])
+
+    async def _ok(request):
+        return "PASS"
+
+    def _as(actor):
+        monkeypatch.setattr(_authz_mod, "get_current_admin", lambda r, a=actor: a)
+
+    # viewer 业务写 -> 403（fastapi JSONResponse）
+    _as("vicky")
+    resp = await write_guard_middleware(
+        _FakeRequest(method="POST", path="/api/gateways"), _ok)
+    assert resp.status_code == 403
+    assert "viewer" in resp.body.decode()
+
+    # viewer 改自己密码 -> 豁免（_SKIP_PATHS）
+    resp = await write_guard_middleware(
+        _FakeRequest(method="POST", path="/api/users/me/password"), _ok)
+    assert resp == "PASS"
+
+    # admin / super 写 -> 放行
+    for actor in ("adam", "sue"):
+        _as(actor)
+        resp = await write_guard_middleware(
+            _FakeRequest(method="POST", path="/api/gateways"), _ok)
+        assert resp == "PASS"
+
+    # 未登录写 -> 放行给下游 _auth_guard（统一 401，不被 write_guard 吞成 403）
+    def _no_cookie(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    monkeypatch.setattr(_authz_mod, "get_current_admin", _no_cookie)
+    resp = await write_guard_middleware(
+        _FakeRequest(method="POST", path="/api/gateways"), _ok)
+    assert resp == "PASS"
+
+    # GET 不拦（只读面）
+    _as("vicky")
+    resp = await write_guard_middleware(
+        _FakeRequest(method="GET", path="/api/gateways"), _ok)
+    assert resp == "PASS"
+    _CUR_SESSION["db"] = None
 
 
 def test_role_of_fallbacks(db_session):
@@ -353,3 +479,9 @@ def test_role_names_contract():
     """三档口径契约（migrate 注释 / 前端角色名映射都依赖它，防漂移）。"""
     from api.authz import ROLE_NAMES
     assert ROLE_NAMES == {0: "viewer", 1: "admin", 2: "super"}
+
+
+def test_enforce_role_flipped():
+    """M3 Phase 1 验证后 ENFORCE_ROLE=True（fail-open 观察期结束）。
+    该断言守住「不许再静默翻回 False」——回退须改测试说明理由。"""
+    assert ENFORCE_ROLE is True

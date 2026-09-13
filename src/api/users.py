@@ -88,10 +88,13 @@ def update_user(uid: int, body: UserUpdate, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail="invalid role")
     if body.status is not None and body.status not in (0, 1):
         raise HTTPException(status_code=400, detail="invalid status")
-    # 不变量：最后一个启用的 super 不可降级/停用；不可停用/降级自己
-    demote = (u.role == 2 and body.role is not None and body.role != 2)
+    # 不变量：最后一个启用的 super 不可降级/停用；不可停用/降级自己。
+    # 降级守卫只保护**启用的** super 行：已停用的 super 不在「启用 super 计数」内，
+    # 降级它不会让系统失去可登录的 super（守卫口径与 _enabled_super_count 一致）。
+    demote = (u.role == 2 and u.status == 1
+              and body.role is not None and body.role != 2)
     disable = (u.status == 1 and body.status == 0)
-    if u.role == 2 and (demote or disable):
+    if demote or disable:
         if u.username == actor["user"]:
             raise HTTPException(status_code=400, detail="cannot demote/disable yourself")
         if _enabled_super_count(db) <= 1:
@@ -134,6 +137,8 @@ def delete_user(uid: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="user not found")
     if u.username == actor["user"]:
         raise HTTPException(status_code=400, detail="cannot delete yourself")
+    # 与 update 同口径：只有「启用的 super」 deletion 才受 last-super 守卫
+    # （停用的 super 行删除不减少可登录 super 数）。
     if u.role == 2 and u.status == 1 and _enabled_super_count(db) <= 1:
         raise HTTPException(status_code=400, detail="cannot delete the last enabled super")
     db.delete(u)
