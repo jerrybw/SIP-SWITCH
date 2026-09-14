@@ -193,6 +193,35 @@ def _perm_of(db, role_code: str, feature: str, is_write: bool) -> str:
     return "none"
 
 
+def _effective_perms(db, role_code: str):
+    """角色的完整 perms 快照（/api/me 供前端显隐用）。
+
+    - 内置三档：BUILTIN_FALLBACK（代码真源），不查库——零依赖、零漂移；
+    - 自定义角色：查 role_perm，缺行补 none（14 feature 全量返回，前端不用猜缺省）；
+    - DB 异常：返回 None（前端见 None 走 Phase 1 角色降级——宁可多显示入口
+      也不把已登录用户锁在门外）。
+    """
+    if role_code in BUILTIN_FALLBACK:
+        fb = dict(BUILTIN_FALLBACK[role_code])
+        fb.pop("other", None)
+        return fb
+    try:
+        from api.roles import FEATURES
+        # 直接查库（不走 _perms_of——它内部吞异常回 {}，DB 故障会被误报成
+        # "自定义角色全 none" 把人锁门外；此处须让异常穿透走 None 降级）
+        from db.models import RolePerm
+        rows = db.execute(select(RolePerm)
+                          .where(RolePerm.role_code == role_code)).all()
+        perms = {}
+        for r in rows:
+            rp = r[0] if not isinstance(r, tuple) else r
+            perms[rp.feature] = rp.perm
+        return {f: perms.get(f, "none") for f in FEATURES}
+    except Exception as e:  # noqa: BLE001
+        print("[authz] effective perms failed (role=%s): %s" % (role_code, e), flush=True)
+        return None
+
+
 def require_role(*roles):
     """FastAPI 依赖工厂：Depends(require_role("admin"))。
 
