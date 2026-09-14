@@ -62,7 +62,7 @@
 
 | 编号 | 任务 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| T-301 | 登录鉴权 + 角色 + 操作日志 | ✅ | ✅ `/login` `/logout` `/me`；**✅ `sys_user.role` 校验已落地**：`api/authz.py` `ENFORCE_ROLE=True` + `require_role()` + viewer 全站只读守卫；**⚠️ 仅剩「自定义角色」未做（Phase 2，2026-09-14 已派 zcode）**；**✅ `operation_log` 已落写入**（`api/oplog.py` `record_op()` + `oplog_middleware` HTTP 写操作自动埋点；**2026-09-14 回填：文档此前描述过时**）。2026-09-12 安全加固（zcode，Co-authored-by 归因）：① `/fs/*` xml_curl 回调 HTTP Basic 认证（fail-closed）+ `/fs/directory` 明文泄露收敛/a1-hash 下发（`api/fs_auth.py`，凭据 `deploy.sh` 两侧同源、存量增量补配，真实 REGISTER 摘要认证 E2E 闭环）；② 口令哈希升级版本化 PBKDF2 + 恒时序比对（`core/pw_hash.py`，登录兼容遗留 sha256 平滑升级，`tools/hash_password.py` CLI）；③ CSRF 纵深防御：cookie 面写操作同源校验（`api/csrf.py`，豁免 Authorization/`/fs/*`/login/logout；⚠️ 裸 curl cookie 脚本写 `/api/*` 将 403，Sec-Fetch-Site 放宽口径待拍板） |
+| T-301 | 登录鉴权 + 角色 + 操作日志 | ✅ | ✅ `/login` `/logout` `/me`；**✅ `sys_user.role` 校验已落地**：`api/authz.py` `ENFORCE_ROLE=True` + `require_role()` + viewer 全站只读守卫；****✅ Phase 2 自定义角色 + 权限矩阵已落地**（2026-09-14 zcode：14 feature 矩阵执行层 `6a54c7e` + 角色 CRUD/前端三件/测试，见下方交付记录；容器 E2E 403 矩阵走查待办）**；**✅ `operation_log` 已落写入**（`api/oplog.py` `record_op()` + `oplog_middleware` HTTP 写操作自动埋点；**2026-09-14 回填：文档此前描述过时**）。2026-09-12 安全加固（zcode，Co-authored-by 归因）：① `/fs/*` xml_curl 回调 HTTP Basic 认证（fail-closed）+ `/fs/directory` 明文泄露收敛/a1-hash 下发（`api/fs_auth.py`，凭据 `deploy.sh` 两侧同源、存量增量补配，真实 REGISTER 摘要认证 E2E 闭环）；② 口令哈希升级版本化 PBKDF2 + 恒时序比对（`core/pw_hash.py`，登录兼容遗留 sha256 平滑升级，`tools/hash_password.py` CLI）；③ CSRF 纵深防御：cookie 面写操作同源校验（`api/csrf.py`，豁免 Authorization/`/fs/*`/login/logout；⚠️ 裸 curl cookie 脚本写 `/api/*` 将 403，Sec-Fetch-Site 放宽口径待拍板） |
 | T-302 | 接入管理页 | ✅ | `/{entity}` 通用 CRUD + `/access-points/{id}/gateway-policies` |
 | T-303 | 落地管理页 | ✅ | `gateway` / `carrier` CRUD |
 | T-304 | 路由配置页 | ✅ | `prefix_route` |
@@ -70,7 +70,7 @@
 | T-306 | CDR 查询/导出/录音下载 | ✅ | ✅ 查询 `/cdr` `/cdr/{uuid}` `/api/cdr`；**✅ 录音播放/下载（#70，2026-09-11）**：`GET /api/cdr/{uuid}/recording`（文件流+Range 206，支持 `?download=1`）+ `/recording/meta`；录音改 URI 抽象 `local://<node_uuid>/<file>`，共享卷 `./data/recordings`；**✅ CDR 导出已落地**（`GET /api/cdr/export`，`src/api/cdr_export.py`；**2026-09-14 回填：文档此前描述过时**） |
 | T-307 | 系统设置 | ✅ | `/sys-config` + `system_setting` |
 
-**M3 真实缺口**：~~角色校验 · 操作日志 · CDR 导出~~ **三项均已闭环**（2026-09-14 实地核实回填）；**当前唯一缺口 = 自定义角色 + 权限矩阵（Phase 2，2026-09-14 已派 zcode）** ｜ 录音下载/播放已闭环（#70）
+**M3 真实缺口**：~~角色校验 · 操作日志 · CDR 导出~~ **三项均已闭环**（2026-09-14 实地核实回填）；~~当前唯一缺口 = 自定义角色 + 权限矩阵（Phase 2，2026-09-14 已派 zcode）~~ **Phase 2 已交付（2026-09-14，容器 E2E + V1 复测待批次执行）** ｜ 录音下载/播放已闭环（#70）
 
 ## 5. 二期计费（需求口径） — 2 完成 / 1 部分 / 1 未开始
 
@@ -767,3 +767,51 @@ docker exec <gateway> python /app/tools/cdr_health.py --minutes 60
 **分支**：`feature/zcode/p2-conc-precheck-realtime`（88affa6，基于 16b6ca7）。
 测试：precheck ✓；全量 107 passed / 37 skipped / 0 failed（本地无 MySQL，route/rules/
 cdr_preserve_cols 三文件按既有口径 skip/ignore；容器真库全量以合入方复跑为准）。
+
+## 2026-09-14 M3 Phase 2 交付记录：自定义角色 + 权限矩阵（zcode，实施方案 P1-P6 全批）
+
+**范围**：`reviews/实施方案-M3-P2-roles-by-zcode.md` v1.0 §8 实施顺序 3-6 步（1-2 步已随 `6a54c7e` 提交）。
+**分支**：`feature/zcode/m3-p2-roles`。
+
+### 后端
+- **`api/roles.py`（新文件，163 行）**：角色 CRUD 5 端点（GET 列表+矩阵聚合 / GET options / POST / PUT / DELETE），仅 super
+  （`require_role("super")`，自定义角色恒不匹配 = 纵深兜底）。守卫全落：builtin 不可删改停（§守卫1）、
+  删/停被引用角色 400 先转移用户（§守卫2 及延伸）、新角色默认全 none（§守卫3）、自定义角色 users/system 恒 none——
+  显式给值 400 拒绝不静默改写（§守卫4）、零缓存改动即生效（§守卫5）。code 格式 `^[a-z][a-z0-9_]{1,31}$`。
+- **`api/users.py`**：`role_code` 支持——create/update 挂自定义角色（校验存在+启用，停用/未知 400；
+  内置 code 走 role_code 字段 400，三档仍走 int 列保持单一口径）；自定义角色行 int 列同步记 admin(1)
+  兜底（不落 0/2，防清空 role_code 后误判 viewer/super）；**last-super 守卫联动**：super 挂自定义角色
+  = 降级路径，同样受「最后一个启用 super 不可降级/停用」与「不可操作自己」拦截；update `role_code=""`
+  清回 int 三档。列表 `_role_display` 带自定义角色名（含停用标注）。
+- **`api/authz.py` `_effective_perms` 修正**：不复用 `_perms_of`（它吞异常回 {}，会把 DB 故障误报成
+  「自定义角色全 none」把人锁门外）——自定义角色直查 role_perm 让异常穿透返回 None，前端走 Phase 1
+  降级（PITFALLS #76）。
+- **app.py +2 行**（已随执行层批次报备获批）：`roles_router` import + include_router（crud 兜底前，#34）。
+
+### 前端（admin.js + index.html，M3 独占；?v= 20260913b→20260914a 本方 bump）
+1. **角色管理页**（新 SECTIONS `roles`，superOnly）：列表（内置标注/启停/矩阵覆盖数）+
+   14 feature × 无/只读/可写三态勾选弹层；内置只读展示（真源=代码）；users/system 行锁定显示「无（锁定）」。
+2. **users 页**：角色下拉改 `/api/roles/options` 动态拉取（内置三档 + 自定义 `code:` 前缀编码），
+   拉取失败回落纯三档（老后端窗口零回归）；列表角色列自定义角色显示角色名；保存按前缀解析 role/role_code。
+3. **perms 显隐**（替代 viewer 硬编码）：`/api/me` 响应 perms（auth.py 既有未提交改动）→
+   `renderSidebar` 按 perm=none 隐藏模块（oplogs 对 viewer/admin 放开，拍板 P6）；
+   `renderTable` 新增按钮按 perm=write 泛化（老后端降级：perms 缺失仅 viewer 只读，Phase 1 零回归）。
+
+### 测试（本地全量 **163 passed + 44 skipped 零失败**；容器基线 177，新增后待容器复核）
+- **`tests/test_roles_m3.py`（新，30 例）**：A 判定 6 例（role_code 优先/NULL 回落 int/内置 code 免查表信任/
+  禁用回落 admin/未知回落 admin/用户缺失 admin）；B perm_guard 7 例（自定义只读写 403、none 读 403、
+  other 内置放行自定义 403、豁免路径、未登录穿透下游 401、users admin 403 super 通）；C 内置等价回归
+  （BUILTIN_FALLBACK 14×3 与实施方案 §1 定稿矩阵逐格断言 + 空表不破防 + 自定义缺行 none）；
+  D 角色守卫 9 例（默认全 none、code/保留字/冲突校验、builtin 不可删改停、删/停被引用 400、
+  改 perms 整组覆盖即生效、删角色清 role_perm、list/options 形状）；F 仅 int 角色用户 Phase 1 等价 5 断言；
+  G _effective_perms 3 例（内置不查库/自定义缺行补 none/DB 异常 None）。
+- **`tests/test_users_m3.py` 扩展（+5 例，31→36）**：role_code 挂载 create/update/校验/清空 +
+  last-super 守卫联动 + _user_out 形状（role_code 字段）。
+- E 组（migrate 幂等连跑两遍）按既有口径容器内跑，本地不写。
+
+### 遗留待办（非本批阻塞）
+- 容器全量 pytest + zdev E2E：403 矩阵全走查（自定义角色 14 feature × 读/写）、前端冒烟（角色页勾选保存、
+  users 下拉、perms 显隐）、V1 复测三件套（`[cdr-xml] ok=True`、`data/xml_cdr/` 无新增、`cdr_health=0`）。
+- push 由用户执行（zcode 无 token）。
+
+Co-authored-by: zcode <zcode@agent.local>

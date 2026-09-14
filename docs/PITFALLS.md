@@ -508,3 +508,24 @@
       —— 先看 SQL 里的 INSERT 列清单，不要去看 DDL。
     - **附带教训**：`1054` 属于 `OperationalError`（不是 `ProgrammingError`），
       按异常类型归类会把排查方向带偏。
+
+75. **authz 模块级 `from db.session import SessionLocal`：测试桩要双点替换（2026-09-14 M3-P2 落地实测）**：
+    - **现象**：单测里 `patch db.session.SessionLocal` 后直调 `write_guard_middleware`，
+      依然 `TypeError: 'NoneType' object is not callable`。
+    - **根因**：`authz.py` 是 `from db.session import ... ` 值拷贝——名字绑定在 **authz 命名空间**，
+      换 `db.session.SessionLocal` 不影响 `authz.SessionLocal`。`_login_check_db` 那批没踩坑
+      是因为它**函数体内惰性 import**（每次现查 db.session）。
+    - **规则**：桩点跟着**使用方命名空间**走：`patch(api.authz, "SessionLocal", ...)` +
+      `patch(db.session, "SessionLocal", ...)` 双点都换（别的模块也可能函数内 import）。
+      test_users_m3 的 `_as_super` 只换了 db.session 那一点，Phase 1 未踩坑纯因守卫函数
+      恰好走了不触发该绑定的路径；test_roles_m3 补齐后 30 例全绿。
+
+76. **`_effective_perms` 不能复用 `_perms_of`（吞异常语义相反，2026-09-14 M3-P2）**：
+    - **现象**：`_effective_perms` 声称「DB 异常返回 None（前端 Phase 1 降级）」，测试实测
+      DB 故障时自定义角色返回**全 none dict**——用户被锁在管理端门外（菜单全隐藏）。
+    - **根因**：`_perms_of` 内部 `except` 后对自定义角色**回空 dict**（供 perm_guard 的
+      fail-closed 语义，是对的）；`_effective_perms` 套用它，异常被吃掉，try/except None
+      永不触发。同一异常两个消费方要**相反**的兜底：执行层要 fail-closed（{}），展示层要
+      fail-open（None）。
+    - **规则**：展示/显隐路径查库要**让异常穿透**（自己 try），不要复用执行层的吞异常助手；
+      写测试时对每个「DB 异常」分支都造真异常对象断言行为，注释里的承诺不算数。
