@@ -127,10 +127,11 @@ def db_session(db_engine):
     s.close()
 
 
-def _mk_user(sess, username, role=1, status=1, pw="pass-word-123"):
+def _mk_user(sess, username, role=1, status=1, pw="pass-word-123", role_code=None):
     from core.pw_hash import hash_password
     u = SysUser(username=username, password_hash=hash_password(pw),
-                role=role, status=status, created_at=datetime.utcnow())
+                role=role, role_code=role_code, status=status,
+                created_at=datetime.utcnow())
     sess.add(u)
     sess.commit()
     sess.refresh(u)
@@ -377,8 +378,71 @@ def test_list_users_pagination(super_env):
 def test_user_out_shape(db_session):
     u = _mk_user(db_session, "carol", role=0, status=1)
     d = _user_out(u)
-    assert d == {"id": u.id, "username": "carol", "role": 0, "role_name": "viewer",
-                 "status": 1, "created_at": u.created_at}
+    assert d == {"id": u.id, "username": "carol", "role": 0, "role_code": None,
+                 "role_name": "viewer", "status": 1, "created_at": u.created_at}
+
+
+# ===========================================================================
+# 2.5 users.py role_code（M3-P2：自定义角色挂到用户）
+# ===========================================================================
+
+def _mk_role_row(sess, code, enabled=1):
+    from db.models import Role
+    r = Role(code=code, name=code, builtin=0, enabled=enabled,
+             sort=100, created_at=datetime.utcnow())
+    sess.add(r)
+    sess.commit()
+    sess.refresh(r)
+    return r
+
+
+def test_create_user_with_custom_role(super_env):
+    """role_code 挂自定义角色：int 列记 admin 兜底；role_code 落库；展示带角色名。"""
+    db = super_env
+    _mk_role_row(db, "ops_ro")
+    r = create_user(UserCreate(username="tia", password="long-enough-99",
+                               role=1, role_code="ops_ro"), db=db)
+    assert r["role_code"] == "ops_ro" and r["role_name"] == "ops_ro"
+    row = db.scalar(select(SysUser).where(SysUser.username == "tia"))
+    assert row.role_code == "ops_ro" and row.role == 1
+
+
+def test_create_user_custom_role_validations(super_env):
+    """未知 code / 停用 code / 内置 code 走 role_code 字段 -> 400。"""
+    db = super_env
+    _mk_role_row(db, "ops_off", enabled=0)
+    for code in ("ghost", "ops_off", "viewer"):
+        with pytest.raises(HTTPException) as e:
+            create_user(UserCreate(username="ux%d" % len(code),
+                                   password="long-enough-99",
+                                   role=1, role_code=code), db=db)
+        assert e.value.status_code == 400
+
+
+def test_update_user_to_custom_role(super_env):
+    """改挂自定义角色 = 降级路径：last-super 守卫同样拦截（_role_of role_code 优先）。"""
+    db = super_env
+    _mk_role_row(db, "ops_ro")
+    u = _mk_user(db, "vic")
+    r = update_user(u.id, UserUpdate(role_code="ops_ro"), db=db,
+                    actor={"user": "root-super", "role": "super"})
+    assert r["role_code"] == "ops_ro" and r["role"] == 1
+    # 唯一 super 挂自定义角色 -> last-super 守卫 400（自定义角色永不是 super）
+    su = db.scalar(select(SysUser).where(SysUser.username == "root-super"))
+    with pytest.raises(HTTPException) as e:
+        update_user(su.id, UserUpdate(role_code="ops_ro"), db=db,
+                    actor={"user": "root-super", "role": "super"})
+    assert e.value.status_code == 400
+
+
+def test_update_user_clear_role_code(super_env):
+    """role_code="" 清回 int 三档（update 端点约定：空串=清空）。"""
+    db = super_env
+    _mk_role_row(db, "ops_ro")
+    u = _mk_user(db, "wes", role=1, role_code="ops_ro")
+    r = update_user(u.id, UserUpdate(role_code="", role=2), db=db,
+                    actor={"user": "root-super", "role": "super"})
+    assert r["role_code"] is None and r["role"] == 2 and r["role_name"] == "super"
 
 
 # ===========================================================================

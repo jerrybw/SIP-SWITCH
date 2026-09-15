@@ -157,15 +157,20 @@ def me(request: Request):
     user = get_current_admin(request)
     # M3：附带角色（前端按角色显隐用户管理/写按钮）。角色每请求现查 DB（token 不携带，
     # 改角色即时生效，无需等 token 过期）；查不到/异常回落 admin（与 authz._role_of 同口径）。
+    # M3-P2：附带 perms 矩阵（前端按 feature 显隐侧栏/新增按钮，替代 viewer 硬编码）。
+    # 内置角色 perms 来自 authz.BUILTIN_FALLBACK（代码真源）；自定义角色查 role_perm，
+    # 查询异常回落 None（前端见 None 走 Phase 1 角色降级，不误隐藏入口）。
     role = "admin"
+    perms = None
     try:
-        from api.authz import _role_of
+        from api.authz import _role_of, _effective_perms
         from db.session import SessionLocal
         db = SessionLocal()
         try:
             role = _role_of(db, user)
+            perms = _effective_perms(db, role)
         finally:
             db.close()
     except Exception:
         pass
-    return {"user": user, "role": role}
+    return {"user": user, "role": role, "perms": perms}

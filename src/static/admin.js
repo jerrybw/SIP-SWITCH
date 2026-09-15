@@ -159,6 +159,8 @@ SECTIONS['nodes'] = { label: '节点状态', custom: 'nodes' };
 SECTIONS['users'] = { label: '用户管理', custom: 'users', superOnly: true };
 // ---- M3 T-301 操作日志（审计面，superOnly 同上；后端 GET 登录即可查）----
 SECTIONS['oplogs'] = { label: '操作日志', custom: 'oplogs', superOnly: true };
+// ---- M3-P2 角色管理（superOnly；后端 require_role("super") 兜底）----
+SECTIONS['roles'] = { label: '角色管理', custom: 'roles', superOnly: true };
 function renderAccounts(key, st) {
   st = st || { page: 1, page_size: 50 };
   var c = document.getElementById('content');
@@ -384,16 +386,36 @@ function textOf(field, value) {
   return String(value);
 }
 
+// M3-P2：侧栏模块 key -> 后端 feature（authz.FEATURE_PATHS 前端的镜像；
+// 只列显隐需要判定的，未列的归 other——内置三档 other 恒可写，不必判）。
+var SECTION_FEATURE = {
+  'access-points': 'access-points', 'gateways': 'gateways',
+  'prefix-routes': 'routes', 'rules': 'rules', 'sip-phones': 'sip-phones',
+  'carriers': 'carriers', 'accounts': 'accounts', 'billing': 'billing',
+  'cdr': 'cdr', 'nodes': 'nodes', 'users': 'users', 'oplogs': 'oplogs',
+  'roles': 'users',
+};
+function permOf(feature) {
+  // perms 矩阵未就绪（老后端 /api/me 无 perms / DB 异常 null）-> Phase 1 角色降级：
+  // super/admin 按 admin 口径放行（other=write 语义），viewer 只读兜底不回归。
+  var p = window._adminPerms;
+  if (!p) return window._adminRole === 'viewer' ? 'read' : 'write';
+  return p[feature] || 'none';
+}
 function renderSidebar() {
   const nav = document.getElementById('sidebar');
   nav.innerHTML = '';
   // M3 T-301：未登录（bootAuth 前）角色未知 -> 按 admin 渲染全量（登录成功后
-  // renderUser 会带角色重绘一次；write_guard 后端兜底，前端显隐只是 UI 优化）。
+  // renderUser 会带角色重绘一次；perm_guard 后端兜底，前端显隐只是 UI 优化）。
   const role = window._adminRole || 'admin';
   Object.keys(SECTIONS).forEach(function (key) {
     const s = SECTIONS[key];
     // superOnly 区：viewer/admin 不显示（操作日志对 super 只读可见）
     if (s.superOnly && role !== 'super') return;
+    // M3-P2：按 perms 矩阵显隐（实施方案 §5-3）——perm=none 的模块不入侧栏。
+    // oplogs 对 viewer/admin 放开（P6 拍板：后端本就允许读，Phase 1 前端隐藏只是过渡）。
+    const feat = SECTION_FEATURE[key];
+    if (feat && permOf(feat) === 'none' && key !== 'oplogs') return;
     const a = document.createElement('a');
     a.textContent = s.label;
     a.onclick = function () { showSection(key); };
@@ -420,6 +442,7 @@ async function showSection(key) {
   if (sec.custom === 'carriers') { renderCarriers(key, st); return; }
   if (sec.custom === 'nodes') { renderNodes(key, st); return; }
   if (sec.custom === 'users') { renderUsers(key, st); return; }
+  if (sec.custom === 'roles') { renderRoles(key, st); return; }
   if (sec.custom === 'oplogs') { renderOplogs(key, st); return; }
   let fq = '';
   if (sec.filters) fq = filterQs(st.filters || {});
@@ -442,11 +465,13 @@ function renderTable(key, rows, st) {
   const sec = SECTIONS[key];
   if (!sec) { toast('未知模块: ' + key, true); return; }
   const c = document.getElementById('content');
-  // M3 T-301：viewer 只读 —— 隐藏「新增」按钮（write_guard 后端兜底，这里只是
-  // 不给无效入口；行内编辑/删除同理由 403 提示，Phase 2 权限矩阵再细化粒度）。
-  const isViewer = window._adminRole === 'viewer';
+  // M3 T-301 → Phase 2：按 perms 矩阵判写权限（viewer 硬编码已泛化到所有只读
+  // 角色；perm_guard 后端兜底，这里只是不给无效入口；行内编辑/删除同理由 403 提示）。
+  const canWrite = permOf(SECTION_FEATURE[key] || '') !== 'none' &&
+    (window._adminPerms ? permOf(SECTION_FEATURE[key] || '') === 'write'
+      : window._adminRole !== 'viewer');   // 老后端降级：仅 viewer 只读
   let html = '<div class="section-head"><h2>' + sec.label + '</h2>' +
-    (isViewer ? '' : '<button class="btn btn-primary btn-sm" id="add-btn">+ 新增</button>') + '</div>';
+    (canWrite ? '<button class="btn btn-primary btn-sm" id="add-btn">+ 新增</button>' : '') + '</div>';
   if (sec.filters) html += filterBarHtml(key, sec, st || {});
   if (sec.topbar) html += topBarHtml(key, sec);
   html += '<div class="table-scroll">';
@@ -1552,23 +1577,26 @@ async function doLogin() {
 function doLogout() {
   api('/api/logout', 'POST').then(function () { location.reload(); }).catch(function () { location.reload(); });
 }
-function renderUser(user, role) {
+function renderUser(user, role, perms) {
   window._adminUser = user;
   // M3 T-301：记录角色（viewer=0 只读 / admin=1 业务 / super=2 用户管理+系统设置）。
   // 旧网关 /api/me 无 role 字段 -> 回落 admin（与 authz._role_of fail-open 同口径）。
   window._adminRole = role || 'admin';
+  // M3-P2：perms 矩阵（实施方案 §5-3）。undefined/null（老后端 / DB 异常）->
+  // 走 Phase 1 角色降级（permOf 里判空回落），宁可多显示入口不锁人。
+  window._adminPerms = perms;
   document.getElementById('admin-user').textContent =
     '管理员：' + user + (window._adminRole !== 'admin' ? '（' +
       ({ viewer: '只读', super: '超级' })[window._adminRole] + '）' : '');
   document.getElementById('logout-btn').style.display = '';
   var cpw = document.getElementById('chpw-btn'); if (cpw) cpw.style.display = '';
   hideLogin();
-  renderSidebar();  // 角色确定后重绘侧栏（按角色显隐 M3 入口）
+  renderSidebar();  // 角色/perms 确定后重绘侧栏（按矩阵显隐 M3 入口）
 }
 async function bootAuth() {
   try {
     const me = await api('/api/me');
-    renderUser(me.user, me.role);
+    renderUser(me.user, me.role, me.perms);
     refreshConcSourceHint();
     showSection('access-points');
   } catch (e) {
@@ -1606,6 +1634,31 @@ var ROLE_OPTS = [
   { v: 1, t: 'admin（业务管理）' },
   { v: 2, t: 'super（用户管理+系统设置）' },
 ];
+// 角色下拉数据（M3-P2 §5-2）：内置三档 int + /api/roles/options 自定义 code。
+// value 编码：'' 前缀整档 int（'0'/'1'/'2'）；'code:xxx' 自定义角色（users.py
+// 后端按 role_code 解析）。拉取失败回落纯三档（老后端窗口零回归）。
+var _ROLE_SELECT = null;
+function roleSelectOpts() {
+  if (_ROLE_SELECT) return Promise.resolve(_ROLE_SELECT);
+  return api('/api/roles/options').then(function (d) {
+    var opts = [
+      { v: '0', t: 'viewer（只读）' },
+      { v: '1', t: 'admin（业务管理）' },
+      { v: '2', t: 'super（用户管理+系统设置）' },
+    ];
+    (d.items || []).forEach(function (o) {
+      if (!o.builtin) opts.push({ v: 'code:' + o.v, t: o.t + '（自定义）' });
+    });
+    _ROLE_SELECT = opts;
+    return opts;
+  }).catch(function () {
+    _ROLE_SELECT = [
+      { v: '0', t: 'viewer（只读）' }, { v: '1', t: 'admin（业务管理）' },
+      { v: '2', t: 'super（用户管理+系统设置）' },
+    ];
+    return _ROLE_SELECT;
+  });
+}
 function roleTxt(v) {
   for (var i = 0; i < ROLE_OPTS.length; i++) if (ROLE_OPTS[i].v === v) return ROLE_OPTS[i].t;
   return String(v);
@@ -1635,7 +1688,7 @@ function renderUsers(key, st) {
       tr.innerHTML =
         '<td>' + u.id + '</td>' +
         '<td>' + escHtml(u.username) + (u.username === window._adminUser ? ' <span class="muted">（我）</span>' : '') + '</td>' +
-        '<td>' + roleTxt(u.role) + '</td>' +
+      '<td>' + (u.role_code ? escHtml(u.role_name || u.role_code) : roleTxt(u.role)) + '</td>' +
         '<td>' + (u.status === 1 ? '<span class="ok">启用</span>' : '<span class="err">停用</span>') + '</td>' +
         '<td>' + (fmtBJ(u.created_at) || '—') + '</td>' +
         '<td style="white-space:nowrap">' +
@@ -1656,37 +1709,46 @@ function usrEdit(u) {
   var isNew = !u;
   // M3 手写弹层（照录音回放模式；openForm 是 SECTIONS 驱动，不适配临时表单）
   document.getElementById('modal-title').textContent = isNew ? '新建用户' : '编辑用户：' + u.username;
-  document.getElementById('modal-body').innerHTML =
-    (isNew ? '<div class="field"><label>用户名</label><input id="f_username" type="text" autocomplete="off"></div>' +
-      '<div class="field"><label>密码（≥8 位）</label><input id="f_password" type="password"></div>' : '') +
-    '<div class="field"><label>角色</label><select id="f_role">' +
-    ROLE_OPTS.map(function (o) { return '<option value="' + o.v + '"' + (u && u.role === o.v ? ' selected' : '') + '>' + o.t + '</option>'; }).join('') +
-    '</select></div>' +
-    '<div class="field"><label>状态</label><select id="f_status">' +
-    '<option value="1">启用</option><option value="0"' + (u && u.status === 0 ? ' selected' : '') + '>停用</option>' +
-    '</select></div>';
-  if (!isNew) document.getElementById('f_role').value = u.role;
-  var save = document.getElementById('modal-save');
-  save.style.display = '';
-  save.onclick = function () {
-    var body = isNew
-      ? { username: document.getElementById('f_username').value.trim(),
-          password: document.getElementById('f_password').value,
-          role: Number(document.getElementById('f_role').value),
-          status: Number(document.getElementById('f_status').value) }
-      : (function () {
-          var patch = {};
-          var role = Number(document.getElementById('f_role').value);
-          var status = Number(document.getElementById('f_status').value);
-          if (role !== u.role) patch.role = role;
-          if (status !== u.status) patch.status = status;
-          return patch;
-        })();
-    var req = isNew ? api('/api/users', 'POST', body)
-      : (Object.keys(body).length ? api('/api/users/' + u.id, 'PUT', body) : Promise.resolve(null));
-    req.then(function () { toast(isNew ? '已创建' : '已保存'); closeModal(); showSection('users'); })
-       .catch(function (e) { toast('保存失败：' + e.message, true); });
-  };
+  // 当前值编码：自定义角色行 -> 'code:'+role_code；否则 int 三档字符串
+  var curRole = u && u.role_code ? 'code:' + u.role_code : String(u ? u.role : 1);
+  roleSelectOpts().then(function (opts) {
+    document.getElementById('modal-body').innerHTML =
+      (isNew ? '<div class="field"><label>用户名</label><input id="f_username" type="text" autocomplete="off"></div>' +
+        '<div class="field"><label>密码（≥8 位）</label><input id="f_password" type="password"></div>' : '') +
+      '<div class="field"><label>角色</label><select id="f_role">' +
+      opts.map(function (o) { return '<option value="' + o.v + '"' + (o.v === curRole ? ' selected' : '') + '>' + o.t + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div class="field"><label>状态</label><select id="f_status">' +
+      '<option value="1">启用</option><option value="0"' + (u && u.status === 0 ? ' selected' : '') + '>停用</option>' +
+      '</select></div>';
+    var save = document.getElementById('modal-save');
+    save.style.display = '';
+    save.onclick = function () {
+      var sel = document.getElementById('f_role').value;
+      var isCustom = sel.indexOf('code:') === 0;
+      var intRole = Number(sel);   // 自定义行 NaN，不进 int 分支
+      var body = isNew
+        ? (function () {
+            var b = { username: document.getElementById('f_username').value.trim(),
+                      password: document.getElementById('f_password').value };
+            if (isCustom) b.role_code = sel.slice(5); else b.role = intRole;
+            return b; })()
+        : (function () {
+            var patch = {};
+            var status = Number(document.getElementById('f_status').value);
+            var oldRole = curRole;
+            if (sel !== oldRole) {
+              if (isCustom) patch.role_code = sel.slice(5);
+              else { patch.role = intRole; if (oldRole.indexOf('code:') === 0) patch.role_code = ''; }
+            }
+            if (status !== u.status) patch.status = status;
+            return patch; })();
+      var req = isNew ? api('/api/users', 'POST', body)
+        : (Object.keys(body).length ? api('/api/users/' + u.id, 'PUT', body) : Promise.resolve(null));
+      req.then(function () { toast(isNew ? '已创建' : '已保存'); closeModal(); showSection('users'); })
+         .catch(function (e) { toast('保存失败：' + e.message, true); });
+    };
+  });
   document.getElementById('modal').classList.remove('hidden');
 }
 function usrResetPw(u) {
@@ -1727,6 +1789,123 @@ function changeOwnPassword() {
   document.getElementById('modal').classList.remove('hidden');
 }
 window.changeOwnPassword = changeOwnPassword;
+
+// ===========================================================================
+// M3-P2 角色管理（实施方案 §5-1）· superOnly，后端 require_role("super") 兜底
+//   内置三档 builtin=1 只读展示（矩阵真源=代码 BUILTIN_FALLBACK，改内置=改代码）；
+//   自定义角色：14 feature × none/read/write 三态勾选，users/system 恒 none（守卫 4）。
+// ===========================================================================
+var FEATURE_LABELS = {
+  'access-points': '接入点', 'gateways': '落地网关', 'routes': '前缀路由',
+  'rules': '限制/变换规则', 'sip-phones': '话机', 'carriers': '运营商',
+  'accounts': '租户/余额', 'billing': '计费报表', 'cdr': '话单查询',
+  'cdr.export': '话单导出', 'nodes': '节点状态', 'users': '用户管理',
+  'oplogs': '操作日志', 'system': '系统设置',
+};
+var PERM_OPTS = [
+  { v: 'none', t: '无' }, { v: 'read', t: '只读' }, { v: 'write', t: '可写' },
+];
+function renderRoles(key, st) {
+  st = st || { page: 1, page_size: 50 };
+  var c = document.getElementById('content');
+  c.innerHTML =
+    '<div class="section-head"><h2>角色管理</h2>' +
+    '<button class="btn btn-primary" id="role-new">＋ 新建角色</button></div>' +
+    '<div class="muted" style="margin-bottom:8px;font-size:12px">' +
+    '内置三档（viewer/admin/super）只读展示——矩阵语义在代码里维护，改内置=改代码。' +
+    '自定义角色默认全「无」（fail-closed）；users/system 恒无（仅内置 super 可管）；改动下一请求即生效。</div>' +
+    '<div class="table-scroll"><table id="role-tbl"><thead><tr>' +
+    '<th>ID</th><th>标识(code)</th><th>名称</th><th>类型</th><th>状态</th><th>操作</th>' +
+    '</tr></thead><tbody></tbody></table></div>';
+  api('/api/roles').then(function (d) {
+    var tb = document.querySelector('#role-tbl tbody');
+    tb.innerHTML = '';
+    var feats = d.features || [];
+    (d.items || []).forEach(function (r) {
+      var tr = document.createElement('tr');
+      var permSum = feats.filter(function (f) { return (r.perms || {})[f] !== 'none'; }).length;
+      tr.innerHTML =
+        '<td>' + r.id + '</td>' +
+        '<td>' + escHtml(r.code) + '</td>' +
+        '<td>' + escHtml(r.name) + '</td>' +
+        '<td>' + (r.builtin ? '<span class="ok">内置</span>' : '自定义') + '</td>' +
+        '<td>' + (r.enabled ? '<span class="ok">启用</span>' : '<span class="err">停用</span>') + '</td>' +
+        '<td style="white-space:nowrap">' +
+        '<button class="btn btn-sm" data-act="view">权限矩阵' + (permSum ? '(' + permSum + ')' : '') + '</button> ' +
+        (r.builtin ? '' :
+          '<button class="btn btn-sm" data-act="edit">编辑</button> ' +
+          '<button class="btn btn-sm btn-danger" data-act="del">删除</button>') +
+        '</td>';
+      tr.querySelector('[data-act="view"]').onclick = function () { roleEdit(r, true); };
+      var eb = tr.querySelector('[data-act="edit"]');
+      if (eb) eb.onclick = function () { roleEdit(r, false); };
+      var db2 = tr.querySelector('[data-act="del"]');
+      if (db2) db2.onclick = function () { roleDel(r); };
+      tb.appendChild(tr);
+    });
+  }).catch(function (e) { toast(e.message, true); });
+  document.getElementById('role-new').onclick = function () { roleEdit(null, false); };
+}
+function roleEdit(r, readonly) {
+  var isNew = !r;
+  document.getElementById('modal-title').textContent =
+    isNew ? '新建角色' : (readonly ? '权限矩阵：' + r.name : '编辑角色：' + r.name);
+  var feats = Object.keys(FEATURE_LABELS);
+  var cur = r ? (r.perms || {}) : {};
+  var rows = feats.map(function (f) {
+    var locked = f === 'users' || f === 'system';   // 守卫 4：恒 none
+    var val = locked ? 'none' : (cur[f] || 'none');
+    return '<tr><td>' + FEATURE_LABELS[f] + '<span class="muted"> ' + f + '</span></td><td>' +
+      (locked || readonly
+        ? '<span class="muted">' + (val === 'none' ? '无（锁定）' : val === 'read' ? '只读' : '可写') + '</span>'
+        : '<select data-feature="' + f + '">' +
+          PERM_OPTS.map(function (o) { return '<option value="' + o.v + '"' + (o.v === val ? ' selected' : '') + '>' + o.t + '</option>'; }).join('') +
+          '</select>') +
+      '</td></tr>';
+  }).join('');
+  document.getElementById('modal-body').innerHTML =
+    (isNew
+      ? '<div class="field"><label>标识 code（^[a-z][a-z0-9_]{1,31}$，不可与内置重名）</label><input id="f_code" type="text" autocomplete="off" placeholder="如 ops_readonly"></div>' +
+        '<div class="field"><label>名称</label><input id="f_name" type="text"></div>'
+      : (readonly ? '' : '<div class="field"><label>名称</label><input id="f_name" type="text" value="' + escHtml(r.name) + '"></div>')) +
+    '<div class="field"><label>权限矩阵（未勾=无）</label>' +
+    '<div class="table-scroll"><table><thead><tr><th>功能点</th><th>权限</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
+    (readonly ? '' : isNew ? '' : '<div class="field"><label>状态</label><select id="f_enabled">' +
+      '<option value="1"' + (r.enabled ? ' selected' : '') + '>启用</option>' +
+      '<option value="0"' + (!r.enabled ? ' selected' : '') + '>停用（须先转移其用户）</option></select></div>');
+  var save = document.getElementById('modal-save');
+  save.style.display = readonly ? 'none' : '';
+  if (!readonly) {
+    save.onclick = function () {
+      var perms = {};
+      document.querySelectorAll('#modal-body select[data-feature]').forEach(function (sel) {
+        perms[sel.dataset.feature] = sel.value;
+      });
+      if (perms.users && perms.users !== 'none') { toast('users/system 恒无（守卫）', true); return; }
+      var body = { perms: perms };
+      if (isNew) {
+        body.code = document.getElementById('f_code').value.trim();
+        body.name = document.getElementById('f_name').value.trim();
+        api('/api/roles', 'POST', body)
+          .then(function () { toast('已创建'); closeModal(); showSection('roles'); })
+          .catch(function (e) { toast('创建失败：' + e.message, true); });
+      } else {
+        body.name = document.getElementById('f_name').value.trim();
+        body.enabled = Number(document.getElementById('f_enabled').value);
+        api('/api/roles/' + encodeURIComponent(r.code), 'PUT', body)
+          .then(function () { toast('已保存'); closeModal(); showSection('roles'); })
+          .catch(function (e) { toast('保存失败：' + e.message, true); });
+      }
+    };
+  }
+  document.getElementById('modal').classList.remove('hidden');
+}
+function roleDel(r) {
+  if (!window.confirm('确认删除角色 ' + r.name + '（' + r.code + '）？仍被用户引用时后端会拒绝。')) return;
+  api('/api/roles/' + encodeURIComponent(r.code), 'DELETE').then(function () {
+    toast('已删除'); _ROLE_SELECT = null; showSection('roles');   // 下拉缓存失效
+  }).catch(function (e) { toast('删除失败：' + e.message, true); });
+}
 
 // ===========================================================================
 // M3 T-301 操作日志（自动埋点查询面）· superOnly 入口，后端登录即可查（兜底）

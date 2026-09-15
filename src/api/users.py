@@ -19,16 +19,50 @@ from sqlalchemy.orm import Session
 
 from api.authz import require_role, ROLE_NAMES
 from core.pw_hash import hash_password, verify_password
-from db.models import SysUser
+from db.models import Role, SysUser
 from db.session import get_db
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
-def _user_out(u: SysUser) -> dict:
+def _user_out(u: SysUser, role_name: str | None = None) -> dict:
+    """role_name：int 三档口径（内置）；自定义角色由 list/create/update 查 roles 表
+    补 display 名（_user_out 本身不查库——直调测试与端点共用同一形状）。"""
     return {"id": u.id, "username": u.username, "role": u.role,
-            "role_name": ROLE_NAMES.get(u.role, "admin"), "status": u.status,
-            "created_at": u.created_at}
+            "role_code": (u.role_code or "").strip() or None,
+            "role_name": role_name if role_name is not None
+            else ROLE_NAMES.get(u.role, "admin"),
+            "status": u.status, "created_at": u.created_at}
+
+
+def _role_display(db: Session, u: SysUser) -> dict:
+    """行展示信息：role_code 非空时补自定义角色名（roles 行缺失/停用仍展示 code，
+    与 authz._role_of 回落 admin 的判定口径分开——展示忠实于数据，判定忠实于安全）。"""
+    out = _user_out(u)
+    if out["role_code"]:
+        r = db.scalar(select(Role).where(Role.code == out["role_code"]))
+        if r is not None:
+            out["role_name"] = r.name + ("（停用）" if not r.enabled else "")
+    return out
+
+
+def _valid_role_code(db: Session, code: str) -> str:
+    """校验并归一 role_code：内置 code（viewer/admin/super）合法但走 int 列表达
+    （保持三档数据单一口径）；自定义 code 须存在且启用（停用角色再挂人 =
+    隐性权限变更，创建期拒绝、存量由 _role_of 回落 admin 兜底）。"""
+    from api.authz import _BUILTIN
+    code = (code or "").strip()
+    if not code:
+        return ""
+    if code in _BUILTIN:
+        raise HTTPException(status_code=400,
+                            detail="builtin role goes via role int field")
+    r = db.scalar(select(Role).where(Role.code == code))
+    if r is None:
+        raise HTTPException(status_code=400, detail="unknown role_code: %s" % code)
+    if not r.enabled:
+        raise HTTPException(status_code=400, detail="role disabled: %s" % code)
+    return code
 
 
 def _enabled_super_count(db: Session) -> int:
@@ -40,10 +74,12 @@ class UserCreate(BaseModel):
     username: str
     password: str
     role: int = 1
+    role_code: str | None = None    # M3-P2：自定义角色（与 role 互斥表达：给出即优先）
 
 
 class UserUpdate(BaseModel):
     role: int | None = None
+    role_code: str | None = None    # None=不改；""=清回 int 三档
     status: int | None = None
     username: str | None = None
 
@@ -62,7 +98,7 @@ def list_users(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=2
         page = total_pages
     rows = db.scalars(select(SysUser).order_by(SysUser.id)
                       .offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": [_user_out(u) for u in rows], "page": page,
+    return {"items": [_role_display(db, u) for u in rows], "page": page,
             "page_size": page_size, "total": total, "total_pages": total_pages}
 
 
@@ -75,15 +111,19 @@ def create_user(body: UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="password too short (min 8)")
     if body.role not in ROLE_NAMES:
         raise HTTPException(status_code=400, detail="invalid role")
+    code = _valid_role_code(db, body.role_code or "")
     dup = db.scalar(select(SysUser).where(SysUser.username == username))
     if dup is not None:
         raise HTTPException(status_code=400, detail="username exists")
+    # 自定义角色用户：int 列同步记 admin(1)——_role_of 只认 role_code，int 仅作
+    # 老代码/报表兜底口径（不落 0/2：防清空 role_code 后把人误判成 viewer/super）
     u = SysUser(username=username, password_hash=hash_password(body.password),
-                role=body.role, status=1, created_at=datetime.utcnow())
+                role=1 if code else body.role,
+                role_code=code or None, status=1, created_at=datetime.utcnow())
     db.add(u)
     db.commit()
     db.refresh(u)
-    return _user_out(u)
+    return _role_display(db, u)
 
 
 @router.put("/{uid}")
@@ -96,11 +136,16 @@ def update_user(uid: int, body: UserUpdate, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail="invalid role")
     if body.status is not None and body.status not in (0, 1):
         raise HTTPException(status_code=400, detail="invalid status")
+    # role_code 语义：None=不改；""=清回 int 三档；值=挂自定义角色（校验存在+启用）。
+    new_code = _valid_role_code(db, body.role_code) if body.role_code is not None else None
     # 不变量：最后一个启用的 super 不可降级/停用；不可停用/降级自己。
     # 降级守卫只保护**启用的** super 行：已停用的 super 不在「启用 super 计数」内，
     # 降级它不会让系统失去可登录的 super（守卫口径与 _enabled_super_count 一致）。
+    # M3-P2：把 super 挂上自定义角色（role_code 非空）同为降级——_role_of 里
+    # role_code 优先，挂着自定义 code 的行不再是 super。
+    becomes_custom = (new_code is not None and new_code != "")
     demote = (u.role == 2 and u.status == 1
-              and body.role is not None and body.role != 2)
+              and ((body.role is not None and body.role != 2) or becomes_custom))
     disable = (u.status == 1 and body.status == 0)
     if demote or disable:
         if u.username == actor["user"]:
@@ -118,11 +163,15 @@ def update_user(uid: int, body: UserUpdate, db: Session = Depends(get_db),
         u.username = nu
     if body.role is not None:
         u.role = body.role
+    if body.role_code is not None:
+        u.role_code = new_code or None
+        if becomes_custom:
+            u.role = 1    # 与 create 同口径：自定义角色行 int 列记 admin 兜底
     if body.status is not None:
         u.status = body.status
     db.commit()
     db.refresh(u)
-    return _user_out(u)
+    return _role_display(db, u)
 
 
 @router.post("/{uid}/reset-password", dependencies=[Depends(require_role("super"))])

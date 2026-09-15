@@ -201,6 +201,9 @@ class SysUser(Base):
     username = mapped_column(String(64), nullable=False)
     password_hash = mapped_column(String(128), nullable=False)
     role = mapped_column(SmallInteger, default=1)
+    # M3-P2：自定义角色标识（roles.code 引用，无 FK——int 列语义保留）。
+    # 判定顺序见 authz._role_of：role_code 优先，NULL 回落 int 三档（老用户零感知）。
+    role_code = mapped_column(String(32), nullable=True)
     status = mapped_column(SmallInteger, default=1)
     created_at = mapped_column(DateTime)
 
@@ -374,3 +377,32 @@ class CarrierLedger(Base):
     balance_after = mapped_column(Numeric(14, 4), nullable=False)
     remark = mapped_column(String(256))
     created_at = mapped_column(DateTime, nullable=False)
+
+
+class Role(Base):
+    """M3 Phase 2：自定义角色（内置三档 builtin=1 不可删不可停）。
+
+    code 是角色标识（sys_user.role_code 引用），name 是展示名。
+    判定顺序见 api/authz._role_of：role_code 优先，缺失回落 int 三档。
+    """
+    __tablename__ = "roles"
+    id = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    code = mapped_column(String(32), nullable=False, unique=True)
+    name = mapped_column(String(64), nullable=False)
+    builtin = mapped_column(SmallInteger, nullable=False, default=0)
+    enabled = mapped_column(SmallInteger, nullable=False, default=1)
+    sort = mapped_column(Integer, nullable=False, default=0)
+    created_at = mapped_column(DateTime)
+
+
+class RolePerm(Base):
+    """M3 Phase 2：角色×功能点权限矩阵。
+
+    perm ∈ none | read | write；feature 见 authz.FEATURES（14 个，集中映射）。
+    UNIQUE(role_code, feature) —— 每角色每功能点一行。
+    """
+    __tablename__ = "role_perm"
+    id = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    role_code = mapped_column(String(32), nullable=False)
+    feature = mapped_column(String(32), nullable=False)
+    perm = mapped_column(String(8), nullable=False, default="none")
