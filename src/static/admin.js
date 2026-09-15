@@ -332,6 +332,7 @@ let FORM_CTX = null;
 // 批1：保存防重复提交守卫（问题2）/ 模块切换竞态请求序号（问题4）
 let _saveBusy = false;
 let _navSeq = 0;
+let _cdrSeq = 0;
 
 async function api(url, method, body) {
   method = method || 'GET';
@@ -410,6 +411,14 @@ function permOf(feature) {
   var p = window._adminPerms;
   if (!p) return window._adminRole === 'viewer' ? 'read' : 'write';
   return p[feature] || 'none';
+}
+// 判某 feature 是否「可写」：perms 矩阵就绪时按矩阵（===write），
+// 老后端降级按角色（仅 viewer 只读）。与 renderTable 的 canWrite 同口径。
+function canWriteFeature(feat) {
+  const p = permOf(feat);
+  if (p === 'none') return false;
+  if (window._adminPerms) return p === 'write';
+  return window._adminRole !== 'viewer';
 }
 function renderSidebar() {
   const nav = document.getElementById('sidebar');
@@ -1115,12 +1124,14 @@ window.playRecording = playRecording;
 
 function renderCdr(key, st) {
   st = st || { page: 1, page_size: 50 };
+  var mySeq = ++_cdrSeq;
   var flt = JSON.parse(localStorage.getItem('cdr_filter') || '{}');
   var shown = JSON.parse(localStorage.getItem('cdr_cols') || 'null');
   if (!shown) { shown = CDR_DEFAULT_COLS.slice(); localStorage.setItem('cdr_cols', JSON.stringify(shown)); }
   else { CDR_FORCE_PUSH.forEach(function(k){ if (shown.indexOf(k)<0) shown.push(k); }); localStorage.setItem('cdr_cols', JSON.stringify(shown)); }
   var c = document.getElementById('content');
   ensureCdrIdMaps().then(function () {
+    if (mySeq !== _cdrSeq) return;
     // 落地网关筛选改下拉（表内网关已按名称展示）；其余筛选保留文本输入。
     var gwOpts = ['<option value="">落地网关(全部)</option>'];
     if (GW_MAP) Object.keys(GW_MAP).sort(function (a, b) { return a - b; }).forEach(function (gid) {
@@ -1155,6 +1166,7 @@ function renderCdr(key, st) {
     if (flt.gateway_id) qs += '&gateway_id=' + encodeURIComponent(flt.gateway_id);
     if (flt.hangup_cause) qs += '&hangup_cause=' + encodeURIComponent(flt.hangup_cause);
     api('/api/cdr' + qs).then(function(data){
+      if (mySeq !== _cdrSeq) return;
       var rows = data.items || [];
       var head = '<tr>' + shown.map(function(k){ var col = CDR_COLS.find(function(x){return x.k===k;}); return '<th>'+(col?col.t:k)+'</th>'; }).join('') + '</tr>';
       var bodyRows = rows.map(function(r){
@@ -1167,17 +1179,13 @@ function renderCdr(key, st) {
       }).join('');
       var table = rows.length ? '<table><thead>'+head+'</thead><tbody>'+bodyRows+'</tbody></table>' : '<div class="placeholder">暂无话单</div>';
       c.insertAdjacentHTML('beforeend', '<div class="cdr-table-wrap">' + table + '</div>');
-      document.getElementById('cdr_search_btn').onclick = cdrSearch;
-      document.getElementById('cdr_reset_btn').onclick = cdrReset;
-      document.getElementById('cdr_cols_btn').onclick = cdrToggleCols;
-      if (window._cdrColsOpen) document.getElementById('cdr_apply_btn').onclick = cdrApplyCols;
       // #70：录音播放按钮（表格是 innerHTML 拼的，用绑定而非内联 onclick）
       var _recBtns = c.querySelectorAll('.act-rec-play');
       for (var _i = 0; _i < _recBtns.length; _i++) {
         _recBtns[_i].onclick = (function (b) { return function () { playRecording(b.getAttribute('data-uuid')); }; })(_recBtns[_i]);
       }
       renderPager(key, data);
-    }).catch(function(e){ toast('话单查询失败：'+e.message, true); });
+    }).catch(function(e){ if (mySeq !== _cdrSeq) return; toast('话单查询失败：'+e.message, true); });
   });
 }
 window.renderCdr = renderCdr;
@@ -1314,13 +1322,16 @@ function resetFilter(key) {
   showSection(key);
 }
 function topBarHtml(key, sec) {
-  let html = '<div class="topbar">';
+  let html = '<div class="module-topbar">';
+  const sysW = canWriteFeature('system');
   sec.topbar.forEach(function (t) {
     const v = (window._sysConfig || {})[t.k] !== undefined ? (window._sysConfig || {})[t.k] : '';
     html += '<label class="topbar-label">' + t.label + '</label>' +
       '<input id="tb_' + key + '_' + t.k + '" class="pager-input" type="number" min="5" value="' + v + '" style="width:90px">';
   });
-  html += '<button class="btn btn-sm btn-primary" id="tb_' + key + '_save">保存</button></div>';
+  html += '<button class="btn btn-sm btn-primary" id="tb_' + key + '_save"' +
+    (sysW ? '' : ' disabled title="当前角色无 system 写权限，配置只读（仅可写的角色可修改）"') +
+    '>保存</button></div>';
   return html;
 }
 function bindTopBar(key, sec) {
@@ -1342,7 +1353,13 @@ function saveTopBar(key, sec) {
 function renderNodes(key, st) {
   st = st || {};
   const c = document.getElementById('content');
+  // 批2-问题7：写入口按权限显隐。重扫走 /api/provision/resync-all（report 归入 nodes/system），
+  // 周期/Webhook 保存走 /api/sys-config（system）。非 write 禁用并给 tooltip，避免「可见必 403」。
+  const sysW = canWriteFeature('system');
+  const rescanW = canWriteFeature('nodes') || sysW;
+  const dis = function (w) { return w ? '' : ' disabled title="当前角色无写权限，此项只读"'; };
   c.innerHTML =
+    '<div class="page-scroll">' +
     '<div class="section-head"><h2>节点状态</h2>' +
     '<button class="btn btn-sm" id="nodes-refresh">刷新</button></div>' +
     // 显眼卡片：多节点下发同步（版本号 + 周期 + 一键全节点重建）
@@ -1350,7 +1367,7 @@ function renderNodes(key, st) {
       '<div class="prov-head">' +
         '<div><div class="prov-title">多节点下发同步</div>' +
         '<div class="prov-sub">任一节点改动落地网关 → 所有 FS 节点自动重建（经 DB 版本号信令，无需节点间互通）</div></div>' +
-        '<button class="btn btn-primary" id="pv_rescan">立即全节点重扫</button>' +
+        '<button class="btn btn-primary" id="pv_rescan"' + dis(rescanW) + '>立即全节点重扫</button>' +
       '</div>' +
       '<div class="prov-stats">' +
         '<div class="prov-stat"><b id="pv_seq">—</b><span>下发版本号</span></div>' +
@@ -1365,7 +1382,7 @@ function renderNodes(key, st) {
         '<label>同步轮询周期</label>' +
         '<input id="pv_interval" class="pager-input" type="number" min="5" style="width:90px">' +
         '<span class="muted" style="font-size:12px">秒</span>' +
-        '<button class="btn btn-sm" id="pv_save">保存周期</button>' +
+        '<button class="btn btn-sm" id="pv_save"' + dis(sysW) + '>保存周期</button>' +
         '<span id="pv_msg" class="muted"></span>' +
       '</div>' +
       '<div class="hint">各节点处理完变更后会把「已同步位点」写回 DB，因此' +
@@ -1384,9 +1401,10 @@ function renderNodes(key, st) {
     '<div class="webhook-row"><label>FS 节点心跳 webhook</label>' +
     '<input id="wh_node" class="pager-input" style="flex:1" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">' +
     '<button class="btn btn-sm" id="wh_node_test">测试</button></div>' +
-    '<div style="margin-top:12px"><button class="btn btn-primary btn-sm" id="wh_save">保存配置</button>' +
+    '<div style="margin-top:12px"><button class="btn btn-primary btn-sm" id="wh_save"' + dis(sysW) + '>保存配置</button>' +
     '<span id="wh_msg" class="muted" style="margin-left:10px"></span></div>' +
-    '<div class="hint" style="margin-top:8px">地址留空 = 不推送。保存后立即生效，无需重启。</div></div>';
+    '<div class="hint" style="margin-top:8px">地址留空 = 不推送。保存后立即生效，无需重启。</div></div>' +
+    '</div>';
 
   api('/api/sys-config').then(function (cfg) {
     const gw = document.getElementById('wh_gw');
@@ -1402,6 +1420,10 @@ function renderNodes(key, st) {
   document.getElementById('wh_node_test').onclick = function () { testWebhook('node'); };
   document.getElementById('pv_save').onclick = saveProvisionInterval;
   document.getElementById('pv_rescan').onclick = doFullRescan;
+  if (!sysW) {
+    var _pm = document.getElementById('pv_msg'); if (_pm) _pm.textContent = '当前角色只读';
+    var _wm = document.getElementById('wh_msg'); if (_wm) _wm.textContent = '当前角色只读';
+  }
   loadNodes();
   // 进入页面后自动刷新（15s），离开节点页时由 showSection 清除定时器
   window._nodesTimer = setInterval(function () {

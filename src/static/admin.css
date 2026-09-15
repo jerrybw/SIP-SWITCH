@@ -4,7 +4,7 @@ body { margin: 0; overflow: hidden; font-family: -apple-system, "Segoe UI", "Mic
 .topbar { height: 52px; background: #1f2a44; color: #fff; display: flex; align-items: center;
   padding: 0 18px; gap: 18px; }
 .brand { font-weight: 600; font-size: 16px; }
-.link { color: #9db4ff; text-decoration: none; font-size: 13px; }
+.link { color: #c8d6ff; text-decoration: none; font-size: 13px; }
 .link:hover { text-decoration: underline; }
 .layout { display: flex; height: calc(100vh - 52px); overflow: hidden; }
 .sidebar { width: 200px; flex: 0 0 200px; background: #fff; border-right: 1px solid #e6e8eb; padding: 12px 0; }
@@ -58,14 +58,19 @@ tr:hover td { background: #fafbff; }
 
 .filter-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .filter-bar .pager-input { width: 140px; }
-.topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; background: #fafbfc; border: 1px solid #eef0f3; border-radius: 8px; font-size: 13px; color: #4b5563; }
+.module-topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; background: #fafbfc; border: 1px solid #eef0f3; border-radius: 8px; font-size: 13px; color: #4b5563; }
 .topbar-label { font-weight: 600; }
 .cdr-table-wrap { flex: 1 1 auto; overflow: auto; margin-top: 4px; min-height: 0; }
 .cdr-table-wrap th, .cdr-table-wrap td { white-space: nowrap; }
 .cdr-table-wrap table { width: 100%; min-width: 980px; }
 .pager { position: sticky; bottom: 0; z-index: 5; margin-top: 16px; padding: 10px 2px 4px; background: #f5f6f8; border-top: 1px solid #e6e8eb; }
-.section-head, .filter-bar, .topbar, .cdr-filter, .cdr-cols, .pager { flex-shrink: 0; }
+.section-head, .filter-bar, .module-topbar, .cdr-filter, .cdr-cols, .pager { flex-shrink: 0; }
 .table-scroll { flex: 1 1 auto; overflow: auto; margin-top: 4px; min-height: 0; }
+/* 批2-问题8：节点状态页整体滚动容器（.content{overflow:hidden}，页面自身必须可滚）。
+   flex:1 + min-height:0 让它在 content 的纵向 flex 内收缩并产生滚动条，矮视口/长列表可整页滚动到 Webhook 卡片。 */
+.page-scroll { flex: 1 1 auto; overflow: auto; min-height: 0; padding-right: 4px; }
+/* 节点页滚动容器内表格表头吸顶：复用 .table-scroll thead 的 sticky 方案 */
+.page-scroll table thead th { position: sticky; top: 0; z-index: 2; background: #fafbfc; box-shadow: 0 1px 0 #e6e8eb; }
 .table-scroll table, .cdr-table-wrap table { border-collapse: separate; border-spacing: 0; overflow: visible; }
 .table-scroll thead th, .cdr-table-wrap thead th { position: sticky; top: 0; z-index: 2; background: #fafbfc; box-shadow: 0 1px 0 #e6e8eb; }
 .table-scroll th, .table-scroll td { white-space: nowrap; }
