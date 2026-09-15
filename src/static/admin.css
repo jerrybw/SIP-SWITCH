@@ -109,3 +109,7 @@ tr:hover td { background: #fafbff; }
 .prov-node .badge { font-size: 11px; padding: 1px 8px; }
 .prov-tag { background: #fff; border: 1px solid #dbe3ff; border-radius: 6px;
   padding: 2px 8px; font-size: 12px; color: #37405e; }
+/* 弹窗内矩阵表：取消整页列表的 min-width/nowrap，避免 560px 弹窗裁切（批1-问题1，报告 §3.3）
+   选择器带 .modal-body 前缀，作用域隔离，不影响列表中 .table-scroll 的行为 */
+.modal-body .table-scroll table { width: 100%; min-width: 0; }
+.modal-body .table-scroll th, .modal-body .table-scroll td { white-space: normal; }

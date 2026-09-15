@@ -329,6 +329,9 @@ let RULE_STATE = { caller_restrict: [], callee_restrict: [], caller_translate: [
 const OPT_CACHE = {};
 let CURRENT = null;
 let FORM_CTX = null;
+// 批1：保存防重复提交守卫（问题2）/ 模块切换竞态请求序号（问题4）
+let _saveBusy = false;
+let _navSeq = 0;
 
 async function api(url, method, body) {
   method = method || 'GET';
@@ -352,7 +355,13 @@ function toast(msg, isErr) {
 async function loadOptions(field) {
   if (!field.src) return field.options || [];
   if (OPT_CACHE[field.src]) return OPT_CACHE[field.src];
-  const data = await api(field.src + '?page_size=500');
+  let data;
+  try {
+    data = await api(field.src + '?page_size=500');
+  } catch (e) {
+    toast('选项加载失败：' + e.message, true);
+    return [];
+  }
   const rows = Array.isArray(data) ? data : (data.items || []);
   const opts = rows.map(function (r) {
     let t = r[field.optt];
@@ -383,7 +392,7 @@ function textOf(field, value) {
     const o = OPT_CACHE[field.src].find(function (x) { return String(x.v) === String(value); });
     if (o) return o.t;
   }
-  return String(value);
+  return escapeAttr(String(value));
 }
 
 // M3-P2：侧栏模块 key -> 后端 feature（authz.FEATURE_PATHS 前端的镜像；
@@ -425,6 +434,7 @@ function renderSidebar() {
 }
 async function showSection(key) {
   if (window._nodesTimer) { clearInterval(window._nodesTimer); window._nodesTimer = null; }
+  const navSeq = ++_navSeq;
   CURRENT = key;
   document.querySelectorAll('#sidebar a').forEach(function (a) {
     a.classList.toggle('active', a.dataset.key === key);
@@ -433,6 +443,8 @@ async function showSection(key) {
   await Promise.all(Object.values(SECTIONS).map(function (s) {
     return (s.fields || []).filter(function (f) { return f.src; }).map(loadOptions);
   }));
+  // 竞态守卫：等待选项预加载期间又切了模块 → 丢弃本次渲染
+  if (navSeq !== _navSeq) return;
   const sec = SECTIONS[key];
   if (!sec) { toast('未知模块: ' + key, true); return; }
   window.PAGE_STATE = window.PAGE_STATE || {}; const st = window.PAGE_STATE[key] = Object.assign({ page: 1, page_size: 50 }, window.PAGE_STATE[key] || {});
@@ -446,7 +458,16 @@ async function showSection(key) {
   if (sec.custom === 'oplogs') { renderOplogs(key, st); return; }
   let fq = '';
   if (sec.filters) fq = filterQs(st.filters || {});
-  const data = await api(sec.list + '?page=' + st.page + '&page_size=' + st.page_size + fq);
+  let data;
+  try {
+    data = await api(sec.list + '?page=' + st.page + '&page_size=' + st.page_size + fq);
+  } catch (e) {
+    const cEl = document.getElementById('content');
+    if (cEl) cEl.innerHTML = '<div class="placeholder">加载失败：' + escapeAttr(e.message) + '</div>';
+    return;
+  }
+  // 竞态守卫：列表请求期间又切了模块 → 丢弃本次渲染
+  if (navSeq !== _navSeq) return;
   if (sec.topbar) { try { window._sysConfig = await api('/api/sys-config'); } catch (e) {} }
   const rows = data.items || [];
   if (key === 'gateways') {
@@ -458,6 +479,7 @@ async function showSection(key) {
       rows.forEach(function (row) { row._prefixes = byGw[row.id] || []; });
     } catch (e) {}
   }
+  if (navSeq !== _navSeq) return;
   renderTable(key, rows, st);
   renderPager(key, data);
 }
@@ -602,7 +624,14 @@ async function openForm(key, id) {
   if (!sec) { toast('未知模块: ' + key, true); return; }
   const isEdit = id !== null;
   let data = {};
-  if (isEdit) data = await api(sec.list + '/' + id);
+  if (isEdit) {
+    try {
+      data = await api(sec.list + '/' + id);
+    } catch (e) {
+      toast('加载失败：' + e.message, true);
+      return;
+    }
+  }
   FORM_CTX = { key: key, id: id, specials: sec.specials || [] };
   const body = document.getElementById('modal-body');
   body.innerHTML = '';
@@ -629,7 +658,7 @@ async function openForm(key, id) {
     } else if (f.type === 'select' || f.type === 'select-src') {
       control = '<select id="f_' + f.k + '">' +
         '<option value="">（默认）</option>' +
-        opts.map(function (o) { return '<option value="' + o.v + '" ' + (String(o.v) === String(val) ? 'selected' : '') + '>' + o.t + '</option>'; }).join('') +
+        opts.map(function (o) { return '<option value="' + escHtml(o.v) + '" ' + (String(o.v) === String(val) ? 'selected' : '') + '>' + escHtml(o.t) + '</option>'; }).join('') +
         '</select>';
     } else if (f.type === 'textarea') {
       control = '<textarea id="f_' + f.k + '">' + val + '</textarea>';
@@ -759,6 +788,8 @@ async function saveForm() {
   const key = ctx.key, id = ctx.id, specials = ctx.specials;
   const sec = SECTIONS[key];
   if (!sec) { toast('未知模块: ' + key, true); return; }
+  // 防重复提交：请求进行中忽略再次点击（首次点击后即置忙，finally 复位）
+  if (_saveBusy) return;
   for (const f of sec.fields) {
     // 条件必填：requiredIf={k:'auth_mode',v:0} 表示 auth_mode 选 0(点对点) 时本字段必填。
     // 点对点靠来源 IP 识别接入点，留空则无法鉴权；注册模式靠用户名识别，IP 可留空。
@@ -784,6 +815,9 @@ async function saveForm() {
       }
     }
   }
+  const saveBtn = document.getElementById('modal-save');
+  _saveBusy = true;
+  if (saveBtn) saveBtn.disabled = true;
   const body = collectForm();
   try {
     let saved;
@@ -808,6 +842,10 @@ async function saveForm() {
     invalidateOptCache();
     showSection(key);
   } catch (e) { toast('保存失败：' + e.message, true); }
+  finally {
+    _saveBusy = false;
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 document.getElementById('modal-save').onclick = saveForm;
 
@@ -1426,7 +1464,7 @@ function renderNodeSeen() {
     }
     // B1：节点心跳超时时，位点信息已不可信（那个节点根本没在跑），单独标出来
     const staleTag = r.stale ? '<span class="badge badge-off">心跳超时</span>' : '';
-    h += '<span class="prov-node"><b>' + (r.host || r.name || uuid) + '</b>' + staleTag +
+    h += '<span class="prov-node"><b>' + escHtml(r.host || r.name || uuid) + '</b>' + staleTag +
       '<span class="badge ' + cls + '">' + txt + '</span></span>';
   });
   el.innerHTML = h;
@@ -1488,9 +1526,9 @@ function loadNodes() {
       const hbCell = (r.stale && r.stale_seconds != null)
         ? hb + ' <span class="muted" style="font-size:12px">(已超时 ' + r.stale_seconds + 's)</span>'
         : hb;
-      h += '<tr><td>' + (r.node_uuid || '') + '</td>' +
-        '<td>' + (r.name || '') + '</td>' +
-        '<td>' + (r.host || '') + '</td>' +
+      h += '<tr><td>' + escHtml(r.node_uuid || '') + '</td>' +
+        '<td>' + escHtml(r.name || '') + '</td>' +
+        '<td>' + escHtml(r.host || '') + '</td>' +
         '<td>' + (r.esl_port != null ? r.esl_port : '') + '</td>' +
         '<td><span class="badge ' + sm[1] + '">' + sm[0] + '</span>' + staleTag + '</td>' +
         '<td>' + (r.last_concurrency != null ? r.last_concurrency : '—') + '</td>' +
@@ -1716,7 +1754,7 @@ function usrEdit(u) {
       (isNew ? '<div class="field"><label>用户名</label><input id="f_username" type="text" autocomplete="off"></div>' +
         '<div class="field"><label>密码（≥8 位）</label><input id="f_password" type="password"></div>' : '') +
       '<div class="field"><label>角色</label><select id="f_role">' +
-      opts.map(function (o) { return '<option value="' + o.v + '"' + (o.v === curRole ? ' selected' : '') + '>' + o.t + '</option>'; }).join('') +
+      opts.map(function (o) { return '<option value="' + escHtml(o.v) + '"' + (o.v === curRole ? ' selected' : '') + '>' + escHtml(o.t) + '</option>'; }).join('') +
       '</select></div>' +
       '<div class="field"><label>状态</label><select id="f_status">' +
       '<option value="1">启用</option><option value="0"' + (u && u.status === 0 ? ' selected' : '') + '>停用</option>' +
