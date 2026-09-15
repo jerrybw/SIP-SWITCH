@@ -18,7 +18,7 @@ CFG = {
             "reconnect_interval": 5, "fs_node_uuid": ""},
     "api": {"host": "0.0.0.0", "port": 8000},
     "mysql": {"url": "mysql+pymysql://root:pa55@mysql:3306/sip_switch", "pool_recycle": 3600},
-    "default_sip_domain": "172.22.10.186",
+    "default_sip_domain": "sip.example.com",
     "prepaid_enabled": True,
     "auth": {"admin_user": "admin", "password_salt": "deadbeef",
              "admin_password_hash": "cafe", "jwt_secret": "jwt-secret",
