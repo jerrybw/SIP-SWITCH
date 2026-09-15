@@ -168,6 +168,7 @@ def list_cdr_api(page: int = Query(1, ge=1),
     return {"items": items, "page": page, "page_size": page_size,
             "total": total, "total_pages": tp}
 from api.crud import router as crud_router
+from api.live_calls import router as live_calls_router  # 需求②：实时通话（须在 crud 兜底前注册）
 from api.auth import get_current_admin, router as auth_router
 from api.billing import router as billing_router
 from api.accounts import router as accounts_router
@@ -386,6 +387,11 @@ def stats_concurrency(db: Session = Depends(get_db)):
         "source": source,
     }
 
+# 需求②（2026-09-15）：实时通话明细 /api/stats/live-calls。
+# **必须在 crud_router 之前注册** —— 否则被 crud 兜底 /api/{entity}/{item_id} 抢先匹配
+# （entity=stats、item_id=live-calls 转 int 失败）→ 422（PITFALLS #34）。
+# 并发快照 /api/stats/concurrency 同理，见其上方注释与 test_p2_stats_source 的回归锚点。
+app.include_router(live_calls_router)
 app.include_router(crud_router)
 
 

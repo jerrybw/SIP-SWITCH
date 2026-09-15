@@ -38,6 +38,8 @@ from db.models import (
     AccessPoint, Gateway, GatewayNode, PrefixRoute, Rule, AccessGatewayPolicy, Carrier, Business,
     SipPhone, SystemSetting, Account, Customer,
 )
+from core.config import settings
+from api.sys_config import build_schema, normalize_write, HOT_KEYS  # noqa: F401（清单唯一真源）
 
 router = APIRouter(prefix="/api", tags=["crud"])
 
@@ -241,27 +243,56 @@ def list_customer_options(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # 系统级配置（话机/接入点注册状态同步间隔等，key-value）
 # ---------------------------------------------------------------------------
+# 两类配置的判定标准与清单**集中在一处** = `api/sys_config.py`（唯一真源）：
+#   hot  —— 运行期经 core.sys_setting 实时读 DB `system_setting` 的键（改完立即生效）
+#   cold —— core.config.settings（config_settings.yaml）的**启动快照**（改文件 + 重启才生效）
+# 「系统健康配置」页的参数清单由 GET /sys-config/schema **驱动**，前端不硬编码。
 @router.get("/sys-config")
 def get_sys_config(db: Session = Depends(get_db)):
+    """全量键值（保留原语义：前端还用它读 provision_seen_<uuid> / provision_seq / 顶栏当前值）。"""
     rows = db.scalars(select(SystemSetting)).all()
     return {r.key: r.value for r in rows}
 
 
+@router.get("/sys-config/schema")
+def get_sys_config_schema(db: Session = Depends(get_db)):
+    """系统配置 schema：`hot`（可热加载·可改）/ `cold`（只读）/ `masked_keys`（凭据，不出值）。
+
+    ⚠️ 必须定义在下面通用的 `GET /{entity}/{item_id}` **之前**：否则
+    `/api/sys-config/schema` 会被当作 entity=sys-config、item_id=schema(要 int) → 422
+    （PITFALLS #34，与 /api/stats/* 被 crud 兜底吞掉同型）。
+    """
+    hot_values = {r.key: r.value for r in db.scalars(select(SystemSetting)).all()}
+    return build_schema(settings, hot_values)
+
+
 @router.put("/sys-config")
 async def put_sys_config(request: Request, db: Session = Depends(get_db)):
+    """写第2类（热加载）配置 —— **仅白名单内的键**，越界整请求 400 且不落库。
+
+    为什么加白名单：改造前是"任意 key 都能写"，于是"写了个没人读的键"能成功落库 ——
+    页面上看不见、代码里没读点，成为不可见的配置漂移（PITFALLS #53「死配置」）。
+    现在冷配置（如 prepaid_enabled / concurrent_limit_global）会被明确拒绝并提示原因，
+    而不是让用户误以为"改完生效了"。
+    """
     data = await request.json()
+    accepted, errors = normalize_write(data or {})
+    if errors:
+        detail = "配置项不可写（整请求已拒绝，未写入任何值）：%s。可写项：%s" % (
+            "、".join("%s（%s）" % (k, r) for k, r in errors),
+            "、".join(sorted(HOT_KEYS)),
+        )
+        raise HTTPException(status_code=400, detail=detail)
     out = {}
-    for k, v in (data or {}).items():
-        if v is None:
-            continue
+    for k, v in accepted.items():
         row = db.scalar(select(SystemSetting).where(SystemSetting.key == k))
         if row is None:
-            row = SystemSetting(key=k, value=str(v), updated_at=_now())
+            row = SystemSetting(key=k, value=v, updated_at=_now())
             db.add(row)
         else:
-            row.value = str(v)
+            row.value = v
             row.updated_at = _now()
-        out[k] = str(v)
+        out[k] = v
     db.commit()
     return out
 

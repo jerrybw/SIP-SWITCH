@@ -64,7 +64,11 @@ FEATURE_PATHS = {
     "billing": ("/api/billing",),
     "cdr": ("/api/cdr",),                       # /api/cdr/export 由下表细分子串优先命中
     "cdr.export": ("/api/cdr/export",),
-    "nodes": ("/api/nodes", "/api/provision/resync-all", "/api/webhook-test"),
+    # 2026-09-15 需求②：「实时监控」页（并发/当前通话）复用 nodes 的读权限。
+    # 刻意不新增 feature —— 新增会牵动 M3 权限矩阵（role_perm 需要给每个角色补行，
+    # 缺行即 fail-closed 全 none），为两个只读监控页动权限矩阵不划算。
+    "nodes": ("/api/nodes", "/api/provision/resync-all", "/api/webhook-test",
+              "/api/stats/live-calls"),
     "users": ("/api/users",),
     "oplogs": ("/api/operation-logs",),
     "system": ("/api/sys-config", "/api/stats/concurrency", "/api/monitor/summary"),
