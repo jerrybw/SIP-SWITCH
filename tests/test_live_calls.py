@@ -457,3 +457,29 @@ def test_sys_config_schema_route_registered_before_generic_crud():
     assert src.index('@router.get("/sys-config/schema")') < \
         src.index('@router.get("/{entity}/{item_id}")')
     assert "/api/sys-config/schema" in A.app.openapi()["paths"]
+
+
+# ---------------------------------------------------------------------------
+# 空串筛选参数容错（联调抓出的真 bug：前端默认拼 access_point_id= 空串 → 422）
+# ---------------------------------------------------------------------------
+def test_to_int_or_none_accepts_frontend_empty_string():
+    """前端未选筛选时拼出 `access_point_id=`（空串），必须规整成 None（即不过滤）。"""
+    assert LC._to_int_or_none("") is None
+    assert LC._to_int_or_none(None) is None
+    assert LC._to_int_or_none("   ") is None
+    assert LC._to_int_or_none("abc") is None          # 非法值也按不过滤处理，不报错
+    assert LC._to_int_or_none(5) == 5                  # 已是 int 原样返回
+    assert LC._to_int_or_none("7") == 7                # 数字串解析成 int
+
+
+def test_live_calls_endpoint_tolerates_empty_string_filters(monkeypatch):
+    """端点入口收 str：空串筛选不能 422，必须等价于不过滤。
+
+    这是**联调时前端默认 URL（`?node_uuid=&access_point_id=&gateway_id=`）**直接打过来的场景。
+    """
+    node = _Node("n1", "fs1")
+    _stub_probe(monkeypatch, {"n1": (True, [_row("u1")], {"u1": _dump("u1")}, "")})
+    r = LC.live_calls(node_uuid="", access_point_id="", gateway_id="",
+                      page=1, page_size=50, db=_DB([node]))
+    assert r["total"] == 1 and r["degraded"] is False
+    assert r["items"][0]["call_uuid"] == "u1"

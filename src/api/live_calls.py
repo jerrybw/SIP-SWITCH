@@ -74,6 +74,24 @@ V_ACCESS_POINT = _V + "cdr_access_point_id"
 V_GATEWAY = _V + "cdr_gateway_id"
 V_CARRIER = _V + "cdr_carrier_id"
 
+
+def _to_int_or_none(v):
+    """把筛选参数规整成 int/None。
+
+    前端默认把未选的筛选拼成空串（`access_point_id=`），直接 `int("")` 会抛错、
+    且 FastAPI 声明为 `int` 时连路由都进不来（422）。这里入口收 str，空串/None/
+    非法值一律按 None（即"不过滤"）处理。
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s == "":
+        return None
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return None
+
 # uuid_dump 的 header 名（同样是实测确认，勿改）
 H_ANSWER_STATE = "Answer-State"                    # "answered" / "ringing"
 H_CALL_STATE = "Channel-Call-State"                # DOWN/RINGING/EARLY/ACTIVE/HELD（回落用）
@@ -405,7 +423,7 @@ def query_live_calls(db: Session, node_uuid=None, access_point_id=None, gateway_
 
 
 @router.get("/stats/live-calls")
-def live_calls(node_uuid: str = None, access_point_id: int = None, gateway_id: int = None,
+def live_calls(node_uuid: str = None, access_point_id: str = None, gateway_id: str = None,
                page: int = Query(1, ge=1),
                page_size: int = Query(50, ge=1, le=200),
                db: Session = Depends(get_db)):
@@ -418,8 +436,14 @@ def live_calls(node_uuid: str = None, access_point_id: int = None, gateway_id: i
     兜底 `/api/{entity}/{item_id}` 抢先匹配（`stats` 当 entity、`live-calls` 当
     int 型 item_id）→ 422（PITFALLS #34，与 /api/stats/concurrency 同型）。
 
+    ⚠️ 筛选参数**入口收 str**：前端未选筛选时拼出 `access_point_id=`（空串），
+    FastAPI 无法把空串解析成 int → 422。故在此把空串/非法值规整为 None（即"不过滤"）。
+
     探不通的节点一律进 `nodes[].ok=false` + `degraded=true`，**绝不返 500**：
     否则"少探到几个节点"会被读成"没有通话"，那比报错更危险。
     """
-    return query_live_calls(db, node_uuid=node_uuid, access_point_id=access_point_id,
-                            gateway_id=gateway_id, page=page, page_size=page_size)
+    # 前端默认把未选的筛选拼成空串（access_point_id= / gateway_id=），必须容错。
+    ap_id = _to_int_or_none(access_point_id)
+    gw_id = _to_int_or_none(gateway_id)
+    return query_live_calls(db, node_uuid=node_uuid or None, access_point_id=ap_id,
+                            gateway_id=gw_id, page=page, page_size=page_size)
