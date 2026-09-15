@@ -66,10 +66,10 @@ tr:hover td { background: #fafbff; }
 .pager { position: sticky; bottom: 0; z-index: 5; margin-top: 16px; padding: 10px 2px 4px; background: #f5f6f8; border-top: 1px solid #e6e8eb; }
 .section-head, .filter-bar, .module-topbar, .cdr-filter, .cdr-cols, .pager { flex-shrink: 0; }
 .table-scroll { flex: 1 1 auto; overflow: auto; margin-top: 4px; min-height: 0; }
-/* 批2-问题8：节点状态页整体滚动容器（.content{overflow:hidden}，页面自身必须可滚）。
+/* 批2-问题8：系统健康配置页整体滚动容器（.content{overflow:hidden}，页面自身必须可滚）。
    flex:1 + min-height:0 让它在 content 的纵向 flex 内收缩并产生滚动条，矮视口/长列表可整页滚动到 Webhook 卡片。 */
 .page-scroll { flex: 1 1 auto; overflow: auto; min-height: 0; padding-right: 4px; }
-/* 节点页滚动容器内表格表头吸顶：复用 .table-scroll thead 的 sticky 方案 */
+/* 系统健康配置页滚动容器内表格表头吸顶：复用 .table-scroll thead 的 sticky 方案 */
 .page-scroll table thead th { position: sticky; top: 0; z-index: 2; background: #fafbfc; box-shadow: 0 1px 0 #e6e8eb; }
 .table-scroll table, .cdr-table-wrap table { border-collapse: separate; border-spacing: 0; overflow: visible; }
 .table-scroll thead th, .cdr-table-wrap thead th { position: sticky; top: 0; z-index: 2; background: #fafbfc; box-shadow: 0 1px 0 #e6e8eb; }
@@ -82,7 +82,7 @@ tr:hover td { background: #fafbff; }
 .table-scroll tbody tr:hover td.sticky-right { background: #fafbff; }
 .table-scroll th.sticky-right, .table-scroll td.sticky-right { border-left: 1px solid #e6e8eb; box-shadow: -2px 0 3px -2px rgba(0,0,0,.10); }
 .pf-input { width: 150px; padding: 4px 7px; border: 1px solid #d0d4da; border-radius: 5px; font-size: 12px; font-family: inherit; }
-/* 节点状态页 / Webhook 配置 */
+/* 系统健康配置页 / Webhook 配置 */
 .card { background: #fff; border: 1px solid #e6e8eb; border-radius: 10px; padding: 16px 18px; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
 .card h3 { margin: 0; font-size: 15px; }
 .webhook-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
@@ -97,7 +97,7 @@ tr:hover td { background: #fafbff; }
 .err { color: #d8392b; }
 .btn-x { border: 0; background: none; font-size: 20px; cursor: pointer; line-height: 1; padding: 0 4px; }
 .placeholder.err { color: #d8392b; }
-/* 多节点下发同步卡片（节点状态页顶部，显眼） */
+/* 多节点下发同步卡片（系统健康配置页顶部，显眼） */
 .prov-card { background: linear-gradient(135deg, #eef2ff 0%, #f7f9ff 60%, #fff 100%);
   border: 1px solid #ccd6ff; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px;
   box-shadow: 0 2px 10px rgba(64,96,255,.10); flex-shrink: 0; }
@@ -122,3 +122,35 @@ tr:hover td { background: #fafbff; }
    选择器带 .modal-body 前缀，作用域隔离，不影响列表中 .table-scroll 的行为 */
 .modal-body .table-scroll table { width: 100%; min-width: 0; }
 .modal-body .table-scroll th, .modal-body .table-scroll td { white-space: normal; }
+
+/* 系统健康配置：运行参数 / 基础配置（需求①②） */
+.section-head h3 { margin: 0; font-size: 15px; }
+.sys-row { padding: 8px 2px; border-bottom: 1px solid #f0f2f5; }
+.sys-row:last-child { border-bottom: 0; }
+.sys-lbl { font-size: 13px; color: #2a3bd0; font-weight: 600; }
+.sys-key { font-size: 11px; color: #98a0aa; font-weight: 400; margin-left: 6px; }
+.sys-val { margin-top: 4px; }
+.sys-val .pager-input { padding: 5px 8px; }
+.sys-switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: #4b5563; }
+.sys-effect { display: inline-block; margin-left: 10px; font-size: 12px; color: #1a9e54; }
+
+/* 实时监控（需求②） */
+.mon-tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-shrink: 0; }
+.mon-tab-active { background: #4060ff; border-color: #4060ff; color: #fff; }
+.mon-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px;
+  font-size: 13px; color: #4b5563; }
+.mon-auto { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.mon-global-card { display: flex; align-items: center; gap: 30px; background: #fff;
+  border: 1px solid #e6e8eb; border-radius: 10px; padding: 14px 18px; margin-bottom: 14px;
+  flex-wrap: wrap; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+.mon-global-item b { display: block; font-size: 24px; line-height: 1.2; color: #2a3bd0; }
+.mon-global-item span { font-size: 12px; color: #6b78a8; }
+.mon-section-title { font-size: 14px; font-weight: 600; color: #23306b; margin: 14px 0 8px; }
+.mon-src { margin-left: auto; }
+.mon-degraded { background: #fff4e0; border: 1px solid #f3d9a4; color: #7a4d00; border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 12px; font-size: 13px; }
+.mon-badnode { display: inline-flex; align-items: center; gap: 6px; background: #fff;
+  border: 1px solid #f3d9a4; border-radius: 999px; padding: 2px 10px; margin: 3px 6px 0 0; font-size: 12px; }
+.mon-badnode b { color: #7a4d00; }
+.mon-drill { color: #4060ff; text-decoration: none; cursor: pointer; }
+.mon-drill:hover { text-decoration: underline; }

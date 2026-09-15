@@ -129,6 +129,8 @@ SECTIONS['sip-phones'] = {
   ],
 };
 SECTIONS['cdr'] = { label: '话单', list: '/api/cdr', custom: 'cdr' };
+// T-305 实时监控（需求②）：菜单 key 'monitor'，显隐按 nodes 读权限（SECTION_FEATURE 已映射，不新增 feature）
+SECTIONS['monitor'] = { label: '实时监控', custom: 'monitor' };
 SECTIONS['billing'] = { label: '计费', custom: 'billing' };
 SECTIONS['carriers'] = {
   label: '运营商', list: '/api/carriers', custom: 'carriers', showId: true,
@@ -154,7 +156,7 @@ SECTIONS['accounts'] = {
     { k: 'status', label: '状态', type: 'select', options: [{ v: 1, t: '启用' }, { v: 0, t: '停用' }] },
   ],
 };
-SECTIONS['nodes'] = { label: '节点状态', custom: 'nodes' };
+SECTIONS['nodes'] = { label: '系统健康配置', custom: 'nodes' };
 // ---- M3 T-301 用户管理（superOnly：viewer/admin 不入侧栏；后端 require_role 兜底）----
 SECTIONS['users'] = { label: '用户管理', custom: 'users', superOnly: true };
 // ---- M3 T-301 操作日志（审计面，superOnly 同上；后端 GET 登录即可查）----
@@ -405,8 +407,8 @@ var SECTION_FEATURE = {
   'access-points': 'access-points', 'gateways': 'gateways',
   'prefix-routes': 'routes', 'rules': 'rules', 'sip-phones': 'sip-phones',
   'carriers': 'carriers', 'accounts': 'accounts', 'billing': 'billing',
-  'cdr': 'cdr', 'nodes': 'nodes', 'users': 'users', 'oplogs': 'oplogs',
-  'roles': 'users',
+  'cdr': 'cdr', 'nodes': 'nodes', 'monitor': 'nodes',
+  'users': 'users', 'oplogs': 'oplogs', 'roles': 'users',
 };
 function permOf(feature) {
   // perms 矩阵未就绪（老后端 /api/me 无 perms / DB 异常 null）-> Phase 1 角色降级：
@@ -446,6 +448,7 @@ function renderSidebar() {
 }
 async function showSection(key) {
   if (window._nodesTimer) { clearInterval(window._nodesTimer); window._nodesTimer = null; }
+  if (window._monTimer) { clearInterval(window._monTimer); window._monTimer = null; }
   const navSeq = ++_navSeq;
   CURRENT = key;
   document.querySelectorAll('#sidebar a').forEach(function (a) {
@@ -465,6 +468,7 @@ async function showSection(key) {
   if (sec.custom === 'accounts') { renderAccounts(key, st); return; }
   if (sec.custom === 'carriers') { renderCarriers(key, st); return; }
   if (sec.custom === 'nodes') { renderNodes(key, st); return; }
+  if (sec.custom === 'monitor') { renderMonitor(key, st); return; }
   if (sec.custom === 'users') { renderUsers(key, st); return; }
   if (sec.custom === 'roles') { renderRoles(key, st); return; }
   if (sec.custom === 'oplogs') { renderOplogs(key, st); return; }
@@ -1371,7 +1375,7 @@ function saveTopBar(key, sec) {
   }).catch(function (e) { toast('保存失败：' + e.message, true); });
 }
 
-// ---- 节点状态 + Webhook 配置（#70 系列）----
+// ---- 系统健康配置 + Webhook 配置（#70 系列）----
 function renderNodes(key, st) {
   st = st || {};
   const c = document.getElementById('content');
@@ -1382,9 +1386,9 @@ function renderNodes(key, st) {
   const dis = function (w) { return w ? '' : ' disabled title="当前角色无写权限，此项只读"'; };
   c.innerHTML =
     '<div class="page-scroll">' +
-    '<div class="section-head"><h2>节点状态</h2>' +
+    '<div class="section-head"><h2>系统健康配置</h2>' +
     '<button class="btn btn-sm" id="nodes-refresh">刷新</button></div>' +
-    // 显眼卡片：多节点下发同步（版本号 + 周期 + 一键全节点重建）
+    // ① 节点健康：显眼卡片：多节点下发同步（版本号 + 周期 + 一键全节点重建）
     '<div class="prov-card">' +
       '<div class="prov-head">' +
         '<div><div class="prov-title">多节点下发同步</div>' +
@@ -1414,6 +1418,21 @@ function renderNodes(key, st) {
       '用于改完网关想马上确认所有节点都生效时。</div>' +
     '</div>' +
     '<div id="nodes-table" class="placeholder">加载中…</div>' +
+    // ② 运行参数（可热加载 · 可改）：schema.hot 驱动，保存走 PUT /api/sys-config
+    '<div class="card" style="margin-top:18px">' +
+    '<div class="section-head"><h3>运行参数（可热加载 · 可改）</h3>' +
+    '<span class="muted" style="font-size:12px">保存后立即生效，无需重启</span></div>' +
+    '<div id="sys-schema-hot"><div class="placeholder">加载中…</div></div>' +
+    '<div style="margin-top:12px"><button class="btn btn-primary btn-sm" id="sys-hot-save"' + dis(sysW) + '>保存运行参数</button>' +
+    '<span id="sys-msg" class="muted" style="margin-left:10px"></span></div>' +
+    '</div>' +
+    // ③ 基础配置（只读）：schema.cold 驱动，标注改配置需重启
+    '<div class="card" style="margin-top:18px">' +
+    '<div class="section-head"><h3>基础配置（只读）</h3>' +
+    '<span class="muted" style="font-size:12px">修改需改配置文件并重启</span></div>' +
+    '<div id="sys-schema-cold"><div class="placeholder">加载中…</div></div>' +
+    '</div>' +
+    // ④ Webhook / 告警
     '<div class="card" style="margin-top:18px">' +
     '<div class="section-head"><h3>Webhook 推送配置</h3>' +
     '<span class="muted" style="font-size:12px">落地网关心跳与 FS 节点心跳分开配置</span></div>' +
@@ -1442,6 +1461,8 @@ function renderNodes(key, st) {
   document.getElementById('wh_node_test').onclick = function () { testWebhook('node'); };
   document.getElementById('pv_save').onclick = saveProvisionInterval;
   document.getElementById('pv_rescan').onclick = doFullRescan;
+  document.getElementById('sys-hot-save').onclick = saveHotParams;
+  renderSysParamsSchema();
   if (!sysW) {
     var _pm = document.getElementById('pv_msg'); if (_pm) _pm.textContent = '当前角色只读';
     var _wm = document.getElementById('wh_msg'); if (_wm) _wm.textContent = '当前角色只读';
@@ -1451,6 +1472,77 @@ function renderNodes(key, st) {
   window._nodesTimer = setInterval(function () {
     if (CURRENT === 'nodes') { loadNodes(); loadProvisionCard(); }
   }, 15000);
+}
+
+// ---- 系统健康配置：② 运行参数(可热加载·可改) / ③ 基础配置(只读) ----
+// GET /api/sys-config/schema 契约（后端并行实现，可能尚未就绪；404 时降级为占位提示）：
+//   { hot:  [{key,label,type:'bool'|'int'|'string',value,hint,effect}],
+//     cold: [...同上], masked_keys:[...] }
+// 前端不硬编码参数清单——任何 key 都由 schema 驱动，后端加参数前端自动出现。
+let _sysSchema = null;
+function sysParamId(key) { return 'sys_' + String(key).replace(/[^A-Za-z0-9_]/g, '_'); }
+function sysIsMasked(key) { return _sysSchema && (_sysSchema.masked_keys || []).indexOf(key) >= 0; }
+function sysParamInputHtml(p, ro) {
+  const id = sysParamId(p.key);
+  // 凭据类不展示明文：一律「已配置」，不可编辑不可下发
+  if (sysIsMasked(p.key)) return '<span class="muted">已配置</span>';
+  if (ro) {
+    const disp = (p.value === null || p.value === undefined || p.value === '') ? '—' : String(p.value);
+    return '<span>' + escHtml(disp) + '</span>';
+  }
+  if (p.type === 'bool') {
+    return '<label class="sys-switch"><input type="checkbox" id="' + id + '"' + (p.value ? ' checked' : '') + '>' +
+      '<span>' + (p.value ? '开' : '关') + '</span></label>';
+  }
+  const t = p.type === 'int' ? 'number' : 'text';
+  return '<input id="' + id + '" class="pager-input" type="' + t + '" value="' + escapeAttr(p.value == null ? '' : p.value) + '" style="width:160px">';
+}
+function sysParamRowHtml(p, ro) {
+  const effect = (!sysIsMasked(p.key) && p.effect) ? '<span class="sys-effect">' + escHtml(p.effect) + '</span>' : '';
+  return '<div class="sys-row">' +
+    '<div class="sys-lbl">' + escHtml(p.label || p.key) + '<code class="sys-key">' + escHtml(p.key) + '</code></div>' +
+    '<div class="sys-val">' + sysParamInputHtml(p, ro) + effect + '</div>' +
+    (p.hint ? '<div class="hint">' + escHtml(p.hint) + '</div>' : '') +
+    '</div>';
+}
+function renderSysParamsSchema() {
+  const hotEl = document.getElementById('sys-schema-hot');
+  const coldEl = document.getElementById('sys-schema-cold');
+  if (!hotEl || !coldEl) return;
+  api('/api/sys-config/schema').then(function (schema) {
+    _sysSchema = schema || { hot: [], cold: [], masked_keys: [] };
+    if (hotEl) hotEl.innerHTML = (!_sysSchema.hot || !_sysSchema.hot.length)
+      ? '<div class="placeholder">暂无热加载参数</div>'
+      : _sysSchema.hot.map(function (p) { return sysParamRowHtml(p, false); }).join('');
+    if (coldEl) coldEl.innerHTML = (!_sysSchema.cold || !_sysSchema.cold.length)
+      ? '<div class="placeholder">暂无基础配置项</div>'
+      : _sysSchema.cold.map(function (p) { return sysParamRowHtml(p, true); }).join('');
+  }).catch(function (e) {
+    _sysSchema = null;
+    if (hotEl) hotEl.innerHTML = '<div class="placeholder err">运行参数加载失败：' + escapeAttr(e.message) +
+      '（后端接口 /api/sys-config/schema 可能尚未就绪，待联调）</div>';
+  });
+}
+function collectHotParams() {
+  const body = {};
+  if (!_sysSchema) return body;
+  _sysSchema.hot.forEach(function (p) {
+    if (sysIsMasked(p.key)) return;
+    const el = document.getElementById(sysParamId(p.key));
+    if (!el) return;
+    if (p.type === 'bool') body[p.key] = el.checked;
+    else if (p.type === 'int') { if (el.value === '') return; body[p.key] = Number(el.value); }
+    else body[p.key] = el.value;
+  });
+  return body;
+}
+function saveHotParams() {
+  const body = collectHotParams();
+  if (!Object.keys(body).length) { toast('无参数可保存', true); return; }
+  api('/api/sys-config', 'PUT', body).then(function () {
+    toast('已生效，无需重启');
+    renderSysParamsSchema();
+  }).catch(function (e) { toast('保存失败：' + e.message, true); });
 }
 
 // ---- 多节点下发同步卡片 ----
@@ -1882,7 +1974,7 @@ var FEATURE_LABELS = {
   'access-points': '接入点', 'gateways': '落地网关', 'routes': '前缀路由',
   'rules': '限制/变换规则', 'sip-phones': '话机', 'carriers': '运营商',
   'accounts': '租户/余额', 'billing': '计费报表', 'cdr': '话单查询',
-  'cdr.export': '话单导出', 'nodes': '节点状态', 'users': '用户管理',
+  'cdr.export': '话单导出', 'nodes': '系统健康配置', 'users': '用户管理',
   'oplogs': '操作日志', 'system': '系统设置',
 };
 var PERM_OPTS = [
@@ -2042,4 +2134,371 @@ function loadOplogs(key, st) {
     });
     renderPager(key, d);
   }).catch(function (e) { toast(e.message, true); });
+}
+
+// ===========================================================================
+// T-305 实时监控（需求②）：tab1 实时并发 + tab2 当前通话
+//   - 菜单 key 'monitor'，显隐按 nodes 读权限（SECTION_FEATURE['monitor']='nodes'，
+//     不新增 feature，不动权限矩阵）
+//   - tab1 数据源 GET /api/stats/concurrency（既有接口）；tab2 数据源
+//     GET /api/stats/live-calls（后端并行实现，可能尚未就绪；404 降级占位）
+//   - pagination：tab1 本地分页（20/50/100）；tab2 服务端分页（total/page/...）
+//   - 自动刷新默认开、5s，可关闭；显示「上次刷新时间」
+// ===========================================================================
+let _apMap = null;
+let _concCache = null;
+
+function ensureMonNameMaps() {
+  const jobs = [];
+  if (_apMap) jobs.push(Promise.resolve());
+  else jobs.push(api('/api/access-points?page_size=500').then(function (d) {
+    _apMap = {};
+    (Array.isArray(d) ? d : (d.items || [])).forEach(function (x) { _apMap[x.id] = x.name || ('#' + x.id); });
+  }).catch(function () { _apMap = {}; }));
+  if (GW_MAP) jobs.push(Promise.resolve());
+  else jobs.push(ensureGwMap());
+  return Promise.all(jobs);
+}
+function monNameOf(map, id, fb) {
+  if (id === null || id === undefined || id === '') return fb;
+  return (map && map[String(id)] != null) ? map[String(id)] : fb;
+}
+function monStartTimer() {
+  monStopTimer();
+  const mon = window.PAGE_STATE['monitor'] || {};
+  const auto = mon.tab === 'calls' ? (mon.callsAuto !== false) : (mon.concAuto !== false);
+  if (!auto) return;
+  window._monTimer = setInterval(function () {
+    if (CURRENT !== 'monitor') return;
+    const m = window.PAGE_STATE['monitor'];
+    if (!m) return;
+    if (m.tab === 'calls') loadLiveCalls(true);
+    else loadConcurrency(true);
+  }, 5000);
+}
+function monStopTimer() { if (window._monTimer) { clearInterval(window._monTimer); window._monTimer = null; } }
+function monSetTab(tab) {
+  const mon = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+  mon.tab = tab;
+  mon.page = 1;
+  renderMonitor('monitor', mon);
+}
+function renderMonitor(key, st) {
+  st = st || {};
+  const mon = window.PAGE_STATE['monitor'] = Object.assign({ tab: 'concurrency', page: 1, page_size: 50 }, st || {});
+  window.PAGE_STATE['monitor'] = mon;
+  const cur = mon.tab;
+  const c = document.getElementById('content');
+  c.innerHTML =
+    '<div class="page-scroll">' +
+    '<div class="section-head"><h2>实时监控</h2>' +
+    '<span class="muted" style="font-size:12px">并发快照为 Redis 实时值；当前通话按节点聚合，degraded 时数据不全</span></div>' +
+    '<div class="mon-tabs">' +
+    '<button class="btn btn-sm ' + (cur === 'concurrency' ? 'mon-tab-active' : '') + '" id="mtab-conc">实时并发</button>' +
+    '<button class="btn btn-sm ' + (cur === 'calls' ? 'mon-tab-active' : '') + '" id="mtab-calls">当前通话</button>' +
+    '</div>' +
+    '<div id="mon-tab-body"><div class="placeholder">加载中…</div></div>' +
+    '</div>';
+  document.getElementById('mtab-conc').onclick = function () { monSetTab('concurrency'); };
+  document.getElementById('mtab-calls').onclick = function () { monSetTab('calls'); };
+  monStartTimer();
+  if (cur === 'calls') renderLiveCalls();
+  else renderConcurrency();
+}
+
+// ---- tab1 实时并发 ----
+function monToolbarHtml(tabKey) {
+  const mon = window.PAGE_STATE['monitor'] || {};
+  const autoKey = tabKey + 'Auto';
+  const auto = mon[autoKey] !== false;
+  const last = (tabKey === 'conc' ? mon.concLast : mon.callsLast) || '—';
+  let h = '<label class="mon-auto"><input type="checkbox" id="mon-auto"' + (auto ? ' checked' : '') + '> 自动刷新(5s)</label>' +
+    '<span class="muted" id="mon-last">上次刷新：' + escHtml(String(last)) + '</span>' +
+    '<button class="btn btn-sm" id="mon-refresh">刷新</button>';
+  if (tabKey === 'conc') {
+    h += '<select id="mon-conc-size" class="pager-input">' +
+      '<option value="20"' + (mon.concSize === 20 ? ' selected' : '') + '>20/页</option>' +
+      '<option value="50"' + (!mon.concSize || mon.concSize === 50 ? ' selected' : '') + '>50/页</option>' +
+      '<option value="100"' + (mon.concSize === 100 ? ' selected' : '') + '>100/页</option></select>';
+  }
+  return h;
+}
+function updateMonLast() {
+  const el = document.getElementById('mon-last');
+  if (!el) return;
+  const d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+  el.textContent = '上次刷新：' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function bindMonToolbar(tabKey) {
+  const mon = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+  const autoEl = document.getElementById('mon-auto');
+  if (autoEl && !autoEl._bnd) { autoEl._bnd = 1; autoEl.onchange = function () {
+    mon[tabKey + 'Auto'] = autoEl.checked;
+    monStartTimer();
+    if (autoEl.checked) { if (tabKey === 'conc') loadConcurrency(false); else loadLiveCalls(false); }
+  }; }
+  const rEl = document.getElementById('mon-refresh');
+  if (rEl && !rEl._bnd) { rEl._bnd = 1; rEl.onclick = function () {
+    if (tabKey === 'conc') loadConcurrency(false); else loadLiveCalls(false);
+  }; }
+  const sizeEl = document.getElementById('mon-conc-size');
+  if (sizeEl && !sizeEl._bnd) { sizeEl._bnd = 1; sizeEl.onchange = function () {
+    mon.concSize = Number(sizeEl.value);
+    mon.concApPage = mon.concGwPage = 1;
+    renderConcData();
+  }; }
+}
+function renderConcurrency() {
+  const c = document.getElementById('mon-tab-body');
+  if (!c) return;
+  c.innerHTML =
+    '<div class="mon-toolbar">' + monToolbarHtml('conc') + '</div>' +
+    '<div id="mon-conc-global" class="mon-global-card"><div class="placeholder">加载中…</div></div>' +
+    '<div class="mon-section-title">接入点实时并发</div>' +
+    '<div id="mon-conc-ap"><div class="placeholder">加载中…</div></div>' +
+    '<div class="mon-section-title">落地网关实时并发</div>' +
+    '<div id="mon-conc-gw"><div class="placeholder">加载中…</div></div>';
+  bindMonToolbar('conc');
+  ensureMonNameMaps().then(function () { _concCache = null; loadConcurrency(false); });
+}
+function concSourceBadge(source) {
+  if (source === 'redis') return '<span class="badge badge-on">真源 · Redis</span>' +
+    '<span class="muted" style="margin-left:6px">实时数据</span>';
+  if (source === 'shadow') return '<span class="badge badge-warn">近似 · Shadow</span>' +
+    '<div class="hint" style="margin-top:4px">Redis 不可用：当前为抖动期近似计数，仅供排障参考，非真源</div>';
+  return '<span class="badge badge-off">来源未知</span>';
+}
+function loadConcurrency(silent) {
+  api('/api/stats/concurrency').then(function (d) {
+    _concCache = d || {};
+    if (CURRENT === 'monitor' && (window.PAGE_STATE['monitor'] || {}).tab === 'concurrency') {
+      renderConcData();
+    }
+  }).catch(function (e) {
+    if (!silent) {
+      const ap = document.getElementById('mon-conc-ap');
+      if (ap) ap.innerHTML = '<div class="placeholder err">加载失败：' + escapeAttr(e.message) + '</div>';
+    }
+  });
+}
+function concDataRows(kind, d) {
+  // 全集 = *_limits 的 keys（含并发为 0 的项目）；count 从 ap/gw 取，缺省 0
+  const limits = kind === 'ap' ? (d.ap_limits || {}) : (d.gw_limits || {});
+  const counts = kind === 'ap' ? (d.ap || {}) : (d.gw || {});
+  const map = kind === 'ap' ? _apMap : GW_MAP;
+  const fb = kind === 'ap' ? '接入点' : '落地网关';
+  return Object.keys(limits).map(function (id) {
+    const c = counts[String(id)];
+    return {
+      id: id,
+      name: monNameOf(map, id, fb + ' #' + id),
+      count: (c === null || c === undefined) ? 0 : c,
+      limit: limits[id]
+    };
+  });
+}
+function concPagerHtml(kind, total, pages, page) {
+  const pre = 'mo-' + kind;
+  return '<div class="pager-row" style="margin:8px 0">共 ' + total + ' 条 | 第 ' + page + ' / ' + pages + ' 页' +
+    '<button class="btn btn-sm" id="' + pre + '-prev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button>' +
+    '<button class="btn btn-sm" id="' + pre + '-next"' + (page >= pages ? ' disabled' : '') + '>下一页</button></div>';
+}
+function concTableHtml(kind, d) {
+  const rows = concDataRows(kind, d);
+  const total = rows.length;
+  const ps = (window.PAGE_STATE['monitor'] || {}).concSize || 50;
+  const pages = Math.max(1, Math.ceil(total / ps));
+  const mon = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+  const pgKey = kind === 'ap' ? 'concApPage' : 'concGwPage';
+  if (!mon[pgKey] || mon[pgKey] > pages) mon[pgKey] = 1;
+  const page = mon[pgKey];
+  const slice = rows.slice((page - 1) * ps, page * ps);
+  const body = slice.length ? slice.map(function (r) {
+    return '<tr>' +
+      '<td><a href="javascript:void(0)" class="mon-drill" data-kind="' + kind + '" data-id="' + escapeAttr(String(r.id)) + '" title="查看该维度当前通话">' + escapeAttr(r.name) + '</a></td>' +
+      '<td>' + r.count + '</td>' +
+      '<td>' + (Number(r.limit) > 0 ? r.limit : '不限') + '</td>' +
+      '</tr>';
+  }).join('') : '<tr><td colspan="3" class="muted">暂无数据</td></tr>';
+  return '<div class="table-scroll"><table>' +
+    '<thead><tr><th>名称</th><th>当前并发</th><th>上限</th></tr></thead>' +
+    '<tbody>' + body + '</tbody></table></div>' +
+    concPagerHtml(kind, total, pages, page);
+}
+function renderConcData() {
+  const d = _concCache || {};
+  const g = document.getElementById('mon-conc-global');
+  if (g) {
+    g.innerHTML =
+      '<div class="mon-global-item"><b>' + (d.global != null ? d.global : '—') + '</b><span>当前并发</span></div>' +
+      '<div class="mon-global-item"><b>' + (Number(d.global_limit) > 0 ? d.global_limit : '不限') + '</b><span>全局上限</span></div>' +
+      '<div class="mon-src">' + concSourceBadge(d.source) + '</div>';
+  }
+  const apEl = document.getElementById('mon-conc-ap');
+  if (apEl) apEl.innerHTML = concTableHtml('ap', d);
+  const gwEl = document.getElementById('mon-conc-gw');
+  if (gwEl) gwEl.innerHTML = concTableHtml('gw', d);
+  bindConcPagers();
+  updateMonLast();
+}
+function bindConcPagers() {
+  ['ap', 'gw'].forEach(function (kind) {
+    const pv = document.getElementById('mo-' + kind + '-prev');
+    if (pv && !pv._bnd) { pv._bnd = 1; pv.onclick = function () { localConcPage(kind, -1); }; }
+    const nx = document.getElementById('mo-' + kind + '-next');
+    if (nx && !nx._bnd) { nx._bnd = 1; nx.onclick = function () { localConcPage(kind, 1); }; }
+  });
+  const times = document.querySelectorAll('#mon-tab-body .mon-drill');
+  for (let i = 0; i < times.length; i++) {
+    const a = times[i];
+    if (!a._bnd) { a._bnd = 1; a.onclick = function () { monDrill(a.dataset.kind, a.dataset.id); }; }
+  }
+}
+function localConcPage(kind, delta) {
+  const mon = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+  const pgKey = kind === 'ap' ? 'concApPage' : 'concGwPage';
+  const v = (mon[pgKey] || 1) + delta;
+  if (v < 1) return;
+  mon[pgKey] = v;
+  renderConcData();
+}
+function monDrill(kind, id) {
+  const mon = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+  if (kind === 'ap') { mon.callsAp = String(id); mon.callsGw = ''; }
+  else { mon.callsGw = String(id); mon.callsAp = ''; }
+  monSetTab('calls');
+}
+
+// ---- tab2 当前通话（GET /api/stats/live-calls，服务端分页）----
+var LIVE_DIR_TEXT = { inbound: '入局', outbound: '出局', internal: '内部' };
+var LIVE_STATE_TEXT = { ringing: '振铃', answered: '已应答' };
+function monNameCell(fullName, id) {
+  const hasN = !(fullName === null || fullName === undefined || fullName === '');
+  const hasI = !(id === null || id === undefined || id === '');
+  if (hasN) return escHtml(String(fullName));
+  if (hasI) return '<span class="muted">#' + escHtml(String(id)) + '</span>';
+  return '—';
+}
+function monUuidCell(u) {
+  if (!u) return '—';
+  return '<span title="' + escapeAttr(String(u)) + '">' + escHtml(u.length > 8 ? u.slice(0, 8) : u) + '</span>';
+}
+function monCallerText(c) {
+  const num = c.caller, nm = c.caller_name;
+  const hN = !(num === null || num === undefined || num === '');
+  const hM = !(nm === null || nm === undefined || nm === '');
+  if (!hN && !hM) return '—';
+  if (!hN) return escHtml(String(nm));
+  return escHtml(String(num)) + (hM ? ' <span class="muted">(' + escHtml(String(nm)) + ')</span>' : '');
+}
+function degradedBannerHtml(d) {
+  if (d.degraded !== true) return '';
+  const bad = (d.nodes || []).filter(function (n) { return n && n.ok === false; });
+  const head = '<div class="mon-degraded">⚠ 部分节点未上报，当前通话可能缺失以下节点的数据（勿误读为“没有通话”）：' +
+    '<div style="margin-top:6px">';
+  if (!bad.length) return head + '<span class="muted">（未返回失败节点明细）</span></div></div>';
+  const names = bad.map(function (n) {
+    return '<span class="mon-badnode"><b>' + escHtml(n.name || n.node_uuid || '?') + '</b>' +
+      (n.error ? '<span class="muted">' + escHtml(n.error) + '</span>' : '') + '</span>';
+  }).join('');
+  return head + names + '</div></div>';
+}
+function liveCallsTableHtml(d) {
+  const items = d.items || [];
+  const head = '<tr><th>所在节点</th><th>接入点</th><th>主叫话机</th><th>被叫话机</th><th>落地网关</th>' +
+    '<th>方向</th><th>状态</th><th>时长</th><th>开始时间</th><th>UUID(短)</th></tr>';
+  const body = items.length ? items.map(function (c) {
+    const dur = (c.duration_sec === null || c.duration_sec === undefined) ? '' : c.duration_sec + 's';
+    return '<tr>' +
+      '<td>' + monNameCell(c.node_name, c.node_uuid) + '</td>' +
+      '<td>' + monNameCell(c.access_point_name, c.access_point_id) + '</td>' +
+      '<td>' + monCallerText(c) + '</td>' +
+      '<td>' + (c.callee ? escHtml(String(c.callee)) : '—') + '</td>' +
+      '<td>' + monNameCell(c.gateway_name, c.gateway_id) + '</td>' +
+      '<td>' + ((LIVE_DIR_TEXT[c.direction] || c.direction) || '—') + '</td>' +
+      '<td>' + ((LIVE_STATE_TEXT[c.state] || c.state) || '—') + '</td>' +
+      '<td>' + (dur || '—') + '</td>' +
+      '<td>' + (c.create_time ? fmtBJ(c.create_time) : '—') + '</td>' +
+      '<td>' + monUuidCell(c.call_uuid) + '</td>' +
+      '</tr>';
+  }).join('') : '<tr><td colspan="10" class="muted">当前无通话</td></tr>';
+  return '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
+function renderLiveCallsData(d) {
+  const snapEl = document.getElementById('mon-calls-head');
+  if (snapEl) snapEl.innerHTML = '<span class="muted">快照时间：' + (d.snapshot_at ? fmtBJ(d.snapshot_at) : '—') + '</span>' +
+    (d.total != null ? ' <span class="muted">共 ' + d.total + ' 通</span>' : '');
+  const degEl = document.getElementById('mon-degraded');
+  if (degEl) degEl.innerHTML = degradedBannerHtml(d);
+  const tblEl = document.getElementById('mon-calls-table');
+  if (tblEl) tblEl.innerHTML = liveCallsTableHtml(d);
+  const mon = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+  if (d.page) mon.page = d.page;
+  if (d.page_size) mon.page_size = d.page_size;
+  updateMonLast();
+  renderPager('monitor', d);
+}
+function loadLiveCalls(silent) {
+  const mon = window.PAGE_STATE['monitor'] || {};
+  const qs = '?node_uuid=' +
+    '&access_point_id=' + encodeURIComponent(mon.callsAp || '') +
+    '&gateway_id=' + encodeURIComponent(mon.callsGw || '') +
+    '&page=' + (mon.page || 1) +
+    '&page_size=' + (mon.page_size || 50);
+  api('/api/stats/live-calls' + qs).then(function (d) {
+    if (CURRENT !== 'monitor' || (window.PAGE_STATE['monitor'] || {}).tab !== 'calls') return;
+    renderLiveCallsData(d || {});
+  }).catch(function (e) {
+    if (silent) return;
+    const t = document.getElementById('mon-calls-table');
+    if (t) t.innerHTML = '<div class="placeholder err">当前通话加载失败：' + escapeAttr(e.message) +
+      '（后端接口 /api/stats/live-calls 可能尚未就绪，待联调）</div>';
+  });
+}
+function renderLiveCalls() {
+  const c = document.getElementById('mon-tab-body');
+  if (!c) return;
+  ensureMonNameMaps().then(function () {
+    let apOpts = '<option value="">接入点(全部)</option>';
+    let gwOpts = '<option value="">落地网关(全部)</option>';
+    if (_apMap) Object.keys(_apMap).sort(function (a, b) { return a - b; }).forEach(function (id) {
+      apOpts += '<option value="' + id + '">' + escapeAttr(_apMap[id]) + '</option>';
+    });
+    if (GW_MAP) Object.keys(GW_MAP).sort(function (a, b) { return a - b; }).forEach(function (id) {
+      gwOpts += '<option value="' + id + '">' + escapeAttr(GW_MAP[id]) + '</option>';
+    });
+    const mon = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+    const selAp = mon.callsAp != null ? String(mon.callsAp) : '';
+    const selGw = mon.callsGw != null ? String(mon.callsGw) : '';
+    c.innerHTML =
+      '<div class="mon-toolbar">' + monToolbarHtml('calls') + '</div>' +
+      '<div class="cdr-filter" id="mon-calls-filter">' +
+      '<select id="mc-ap" class="pager-input">' + apOpts + '</select>' +
+      '<select id="mc-gw" class="pager-input">' + gwOpts + '</select>' +
+      '<button class="btn btn-sm btn-primary" id="mc-go">筛选</button>' +
+      '<button class="btn btn-sm" id="mc-reset">重置</button></div>' +
+      '<div id="mon-calls-head"><span class="muted">快照时间：—</span></div>' +
+      '<div id="mon-degraded"></div>' +
+      '<div id="mon-calls-table" class="table-scroll"><div class="placeholder">加载中…</div></div>';
+    const apSel = document.getElementById('mc-ap'); if (apSel) apSel.value = selAp;
+    const gwSel = document.getElementById('mc-gw'); if (gwSel) gwSel.value = selGw;
+    const goBtn = document.getElementById('mc-go');
+    if (goBtn) goBtn.onclick = function () {
+      const m = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+      m.callsAp = document.getElementById('mc-ap').value;
+      m.callsGw = document.getElementById('mc-gw').value;
+      m.page = 1;
+      loadLiveCalls(false);
+    };
+    const rsBtn = document.getElementById('mc-reset');
+    if (rsBtn) rsBtn.onclick = function () {
+      const m = window.PAGE_STATE['monitor'] = window.PAGE_STATE['monitor'] || {};
+      m.callsAp = ''; m.callsGw = ''; m.page = 1;
+      renderLiveCalls();
+    };
+    bindMonToolbar('calls');
+    loadLiveCalls(false);
+  }).catch(function () {
+    c.innerHTML = '<div class="placeholder err">名称映射加载失败，无法渲染当前通话</div>';
+  });
 }
