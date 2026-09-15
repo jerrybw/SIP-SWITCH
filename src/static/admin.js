@@ -1157,7 +1157,8 @@ function renderCdr(key, st) {
     if (GW_MAP) Object.keys(GW_MAP).sort(function (a, b) { return a - b; }).forEach(function (gid) {
       gwOpts.push('<option value="' + gid + '"' + (String(flt.gateway_id) === String(gid) ? ' selected' : '') + '>' + escapeAttr(GW_MAP[gid]) + '</option>');
     });
-    var filterHtml = '<div class="section-head"><h2>话单</h2></div>' +
+    var filterHtml = '<div class="section-head"><h2>话单</h2>' +
+      '<button class="btn btn-sm btn-primary" id="cdr_export_btn">导出 CSV</button></div>' +
       '<div class="cdr-filter">' +
       '<input id="cf_caller" placeholder="主叫(入)" value="' + (flt.caller||'') + '">' +
       '<input id="cf_callee" placeholder="被叫(入)" value="' + (flt.callee||'') + '">' +
@@ -1180,6 +1181,7 @@ function renderCdr(key, st) {
     document.getElementById('cdr_search_btn').onclick = cdrSearch;
     document.getElementById('cdr_reset_btn').onclick = cdrReset;
     document.getElementById('cdr_cols_btn').onclick = cdrToggleCols;
+    document.getElementById('cdr_export_btn').onclick = cdrExport;
     if (window._cdrColsOpen) document.getElementById('cdr_apply_btn').onclick = cdrApplyCols;
     if (window._cdrColsOpen) { var sa=document.getElementById('cdr_selall'); if (sa) { sa.addEventListener('click', function(){ var ck=sa.checked; document.querySelectorAll('.cdr-col').forEach(function(el){ el.checked=ck; }); }); } }
     var qs = '?page=' + st.page + '&page_size=' + st.page_size;
@@ -1239,6 +1241,16 @@ function cdrApplyCols() {
   window._cdrColsOpen = false; renderCdr('cdr', window.PAGE_STATE['cdr']);
 }
 window.cdrApplyCols = cdrApplyCols;
+
+function cdrExport() {
+  var from = document.getElementById('cf_dt_from').value;
+  var to = document.getElementById('cf_dt_to').value;
+  var qs = '';
+  if (from) qs += '?start=' + encodeURIComponent(from + 'T00:00:00');
+  if (to) qs += (qs ? '&' : '?') + 'end=' + encodeURIComponent(to + 'T23:59:59');
+  window.open('/api/cdr/export' + qs, '_blank');
+}
+window.cdrExport = cdrExport;
 
 
 // ---- T-计费：计费报表 ----
