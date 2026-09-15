@@ -93,6 +93,10 @@ tr:hover td { background: #fafbff; }
 .badge-off { background: #fdecea; color: #d8392b; }
 .badge-warn { background: #fff4e0; color: #c77700; }
 .badge-fail { background: #f3e8ff; color: #8347d6; }
+.ok { color: #1a9e54; }
+.err { color: #d8392b; }
+.btn-x { border: 0; background: none; font-size: 20px; cursor: pointer; line-height: 1; padding: 0 4px; }
+.placeholder.err { color: #d8392b; }
 /* 多节点下发同步卡片（节点状态页顶部，显眼） */
 .prov-card { background: linear-gradient(135deg, #eef2ff 0%, #f7f9ff 60%, #fff 100%);
   border: 1px solid #ccd6ff; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px;

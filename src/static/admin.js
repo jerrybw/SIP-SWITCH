@@ -333,6 +333,7 @@ let FORM_CTX = null;
 let _saveBusy = false;
 let _navSeq = 0;
 let _cdrSeq = 0;
+let _toastTimer = null;
 
 async function api(url, method, body) {
   method = method || 'GET';
@@ -350,8 +351,10 @@ async function api(url, method, body) {
 }
 function toast(msg, isErr) {
   const t = document.getElementById('toast');
+  if (_toastTimer) { clearTimeout(_toastTimer); _toastTimer = null; }
   t.textContent = msg; t.className = 'toast' + (isErr ? ' err' : '');
-  setTimeout(function () { t.classList.add('hidden'); }, 2600);
+  t.classList.remove('hidden');
+  _toastTimer = setTimeout(function () { t.classList.add('hidden'); _toastTimer = null; }, 2600);
 }
 async function loadOptions(field) {
   if (!field.src) return field.options || [];
@@ -561,9 +564,15 @@ function renderTable(key, rows, st) {
 window.showSection = showSection;
 
 async function delRow(key, id) {
-  if (!confirm('确认删除？')) return;
-  try { const sec = SECTIONS[key];
-  if (!sec) { toast('未知模块: ' + key, true); return; }
+  var sec = SECTIONS[key]; if (!sec) { toast('未知模块: ' + key, true); return; }
+  var rowName = '';
+  try {
+    var row = await api(sec.list + '/' + id);
+    rowName = row.name || row.username || row.phone_number || row.code || '';
+  } catch (e) {}
+  var label = sec.label + (rowName ? '「' + rowName + '(#' + id + ')」' : '(#' + id + ')');
+  if (!confirm('确认删除' + label + '？该操作不可恢复')) return;
+  try {
   await api(sec.list + '/' + id, 'DELETE'); toast('已删除'); invalidateOptCache(); showSection(key); }
   catch (e) { toast('删除失败：' + e.message, true); }
 }
@@ -739,6 +748,9 @@ async function openForm(key, id) {
   document.getElementById('modal-title').textContent = (isEdit ? '编辑' : '新增') + ' · ' + sec.label;
   document.getElementById('modal-save').style.display = '';  // #70：防播放弹层残留隐藏状态
   document.getElementById('modal').classList.remove('hidden');
+  // #13 键盘可达性：聚焦首个可编辑输入框
+  var firstInput = document.querySelector('#modal-body input:not([readonly]):not([type="hidden"]), #modal-body select');
+  if (firstInput) { try { firstInput.focus(); } catch (e) {} }
 }
 window.openForm = openForm;
 
@@ -922,6 +934,10 @@ function closeModal() {
 }
 document.getElementById('modal-close').onclick = closeModal;
 document.getElementById('modal-cancel').onclick = closeModal;
+// #13 键盘可达性：Esc 关闭弹窗
+document.getElementById('modal').addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') { closeModal(); e.stopPropagation(); }
+});
 
 renderSidebar();
 bootAuth();
@@ -1143,6 +1159,8 @@ function renderCdr(key, st) {
       '<input id="cf_callee" placeholder="被叫(入)" value="' + (flt.callee||'') + '">' +
       '<select id="cf_gw">' + gwOpts.join('') + '</select>' +
       '<input id="cf_cause" placeholder="挂断原因" value="' + (flt.hangup_cause||'') + '">' +
+      '<input id="cf_dt_from" type="date" title="开始日期" value="' + (flt.dt_from||'') + '">' +
+      '<input id="cf_dt_to" type="date" title="结束日期" value="' + (flt.dt_to||'') + '">' +
       '<button class="btn btn-sm btn-primary" id="cdr_search_btn">查询</button>' +
       '<button class="btn btn-sm" id="cdr_reset_btn">重置</button>' +
       '<button class="btn btn-sm" id="cdr_cols_btn">选择显示字段</button>' +
@@ -1165,6 +1183,8 @@ function renderCdr(key, st) {
     if (flt.callee) qs += '&callee=' + encodeURIComponent(flt.callee);
     if (flt.gateway_id) qs += '&gateway_id=' + encodeURIComponent(flt.gateway_id);
     if (flt.hangup_cause) qs += '&hangup_cause=' + encodeURIComponent(flt.hangup_cause);
+    if (flt.dt_from) qs += '&dt_from=' + encodeURIComponent(flt.dt_from);
+    if (flt.dt_to) qs += '&dt_to=' + encodeURIComponent(flt.dt_to);
     api('/api/cdr' + qs).then(function(data){
       if (mySeq !== _cdrSeq) return;
       var rows = data.items || [];
@@ -1194,7 +1214,9 @@ function cdrSearch() {
     caller: document.getElementById('cf_caller').value.trim(),
     callee: document.getElementById('cf_callee').value.trim(),
     gateway_id: document.getElementById('cf_gw').value.trim(),
-    hangup_cause: document.getElementById('cf_cause').value.trim()
+    hangup_cause: document.getElementById('cf_cause').value.trim(),
+    dt_from: document.getElementById('cf_dt_from').value,
+    dt_to: document.getElementById('cf_dt_to').value
   };
   localStorage.setItem('cdr_filter', JSON.stringify(flt));
   showSection('cdr');
@@ -1609,6 +1631,7 @@ function ensureLoginOverlay() {
     '</div>';
   document.body.appendChild(ov);
   document.getElementById('login-go').onclick = doLogin;
+  document.getElementById('login-user').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
   document.getElementById('login-pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
 }
 function showLogin() {
