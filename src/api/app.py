@@ -33,7 +33,7 @@ from api.dialplan_xml import (
     build_allow_xml, build_deny_xml, build_empty_xml, build_outbound_xml, _LOCAL_EXT_RE
 )
 from api.fs_auth import fs_basic_auth_ok, FS_BASIC_PATHS
-from esl_client import _resolve_caller_account, _check_balance_allowed
+from esl_client import _resolve_caller_account, _check_balance_allowed, sweep_unbilled_charges
 from esl_client import pre_insert_cdr
 from route.service import select_outbound_gateway, resolve_access_point, resolve_access_points
 from esl_client import get_concurrency
@@ -965,6 +965,11 @@ async def fs_cdr_api(request: Request):
     except Exception as e:  # noqa: BLE001 —— 回调失败不能让 FS 侧堆积 err-log
         print("[fs_cdr] apply failed: %s" % e, flush=True)
         return JSONResponse({"detail": "internal error"}, status_code=500)
+    # 补算可能刚把金额/归属填齐 → 按「终态」补扣（幂等）
+    try:
+        sweep_unbilled_charges(limit=50)
+    except Exception as _e:  # noqa: BLE001
+        print("[fs_cdr] sweep error: %s" % _e, flush=True)
     return Response("OK uuid=%s billsec=%s" % (fields.get("uuid"), fields.get("billsec")),
                     media_type="text/plain; charset=utf-8")
 

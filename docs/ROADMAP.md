@@ -767,3 +767,78 @@ docker exec <gateway> python /app/tools/cdr_health.py --minutes 60
 **分支**：`feature/zcode/p2-conc-precheck-realtime`（88affa6，基于 16b6ca7）。
 测试：precheck ✓；全量 107 passed / 37 skipped / 0 failed（本地无 MySQL，route/rules/
 cdr_preserve_cols 三文件按既有口径 skip/ignore；容器真库全量以合入方复跑为准）。
+
+## 2026-09-14 V1 真呼叫复测 + 修复（`xml_cdr.conf.xml` 的 `log-http-and-disk` → false）
+
+**背景**：M3P2 收尾的 V1 真呼叫复测（判据 = `[cdr-xml] ok=True` + `data/xml_cdr/` 无新增落盘 + `cdr_health=0`）
+跑出**判据 2 不通过** —— sipp 真呼叫两通（`caller 80000002 → cc → gateway testgateway(7) → sipp-reg UAS`）后，
+`data/xml_cdr/` 由 **16 → 18**，即**每次呼叫新增 1 个 `a_<uuid>.cdr.xml`**。
+
+- 网关 `/fs/cdr` 两次均返回 **200 OK**，FS 侧无 `Unable to post to web server` 错误
+  → 排除「HTTP 失败才回落写盘」，定位为配置项导致的无条件写盘。
+- 与《设计稿-P1-CDR真源.md》§433 验收预期「**无新增落盘（HTTP 成功不再写盘）**」直接冲突。
+
+**修复**：`deploy/fs-config/autoload_configs/xml_cdr.conf.xml`
+`<param name="log-http-and-disk" value="true"/>` → **`value="false"`**；
+`docker restart sip-switch-freeswitch-1` 走 entrypoint 重渲染（勿 `docker cp`）。
+
+**复测（改后同手法再抽一通真呼叫，`uuid=1378a9c5-808d-4e17-86bd-2d38f2de7766`）**：
+
+| 判据 | 结果 |
+|---|---|
+| 1 `[cdr-xml] ok=True` | ✅ `[cdr-xml] recompute uuid=1378a9c5-… reason=cost_missing+recompute+filled:… ok=True` |
+| 2 `data/xml_cdr/` 无新增 | ✅ **18 → 18** |
+| 3 `cdr_health` 可疑 = 0 | ✅ 窗口 60min：总 CDR 4，可疑（reconcile 回填）0 |
+
+CDR `297/298/299` 均健康（`gateway_id=7` / `hangup_cause=NORMAL_UNSPECIFIED` / `fs_node_uuid=2a5f89f1b0f0ce74`）。
+
+**附带（不改仓）**：`sip-cdr-billing-debug` skill 补两条 sipp 场景硬约束（`response` 属性**只认整数码**；
+末尾 `optional` recv 后**不能再跟 `<pause>`**），并新增 `scripts/uac_cc_inviteauth.xml`（INVITE 407 鉴权版）。
+
+## 2026-09-14 · 计费扣款断裂 —— 定位 + 修复 + 验证（WorkBuddy 独立执行）
+
+**背景**：复核「出局是否真扣款」时发现，扣款自 09-11 晚起完全失效（不是"从没扣过"，是"断了"）。
+
+| 日期 | cost>0 的呼叫 | 实际扣款 | 扣款率 |
+|---|---|---|---|
+| 09-09 | 12 | 12 | 100% |
+| 09-10 | 13 | 13 | 100% |
+| 09-11 | 9 | 9 | 100%（末笔 08:26） |
+| 09-12 | 0 | 0 | —（当日无出局呼叫，掩盖） |
+| 09-13 | 10 | 0 | **0%** |
+| 09-14 | 3 | 0 | **0%** |
+
+**根因**：`esl_client._save_cdr` 的降级分支（`_degraded`）使**唯一**扣款入口的条件永假；
+CDR 的金额与归属随后由 XML 真源**补算**，但**补算路径不扣款**。
+后果有二：① 账不平；② **欠费停呼（603）永不触发**（余额不降 → 额度闸门恒放通）。
+详见 `docs/PITFALLS.md` **#77**。
+
+**修复**（本次落地）：
+- 新增 `sweep_unbilled_charges()`：改按 **CDR 终态**（`billed=0 AND cost>0 AND account_id IS NOT NULL`）
+  判定扣款，**不依赖事件路径**；幂等（`uk_ledger_cdr` + `WHERE billed=0` 双保险）。
+- **两个触发点**：① `/fs/cdr` 补算成功后（近实时）② reconcile 循环（兜底 + 自动补历史欠账）。
+- **原降级逻辑不动**（风险最低）。另补 3 处日志：降级 / 跳过扣款 / 无归属 —— 杜绝静默。
+
+**验证**：
+| 项 | 结果 |
+|---|---|
+| 容器全量 pytest | **177 passed**（= 主仓基线，不回归） |
+| 历史欠账自动补扣 | 重启后 **+13 笔**：`billed` 1:34 → **1:47**，ledger 34 → **47**，balance −3.4 → **−4.7** |
+| 并发幂等（实测） | 双网关实例同时扫描同一批 CDR，**只扣一次**（13 笔非 26 笔） |
+| 端到端真呼叫 | 新话单 CDR 305 **`billed=1`**，ledger → **48**，balance → **−4.8** |
+
+---
+
+### 业务口径（用户 2026-09-14 拍板，写入以免再议）
+
+1. **内线互拨不收费**。
+   ⇒ `build_allow_xml` 不下发 `cdr_caller_mid` / `cdr_callee_mid` 导致的
+   内线 `cost=0`，**即期望行为，不是缺陷**，无需补字段。
+   ⚠️ 遗留：`build_allow_xml` 的 docstring 仍写「使内线互拨也能落 account_id **并计费**」，
+   **与口径相反**，待改注释（不改行为）。
+2. **预付费允许透支**（本就有设计，非漏洞）：
+   `account.credit_limit`（信用额度 = 允许透支上限，0=不允许；本例 8004 = **1000**）
+   + `account.min_balance`（预留额度），**逐租户可配**（API 与前端均有入口）。
+   可用余额 = `balance + credit_limit - min_balance`，`> 0` 才放通（`_check_balance_allowed`，拨号前拦截）。
+   ⇒ 账户余额为负属**设计内透支**，不是异常。
+   ⇒ 扣款侧不检查额度是**正确分工**（账单已产生，必须记账）。

@@ -10,7 +10,7 @@
     <!-- 磁盘留档：POST 失败（网关未起/重启/网络抖动）时的兜底原件，也是本设计抓 fixture 的来源。
          容器内固定路径，宿主以卷挂载（见 docker-compose.yml），容器重建不丢。 -->
     <param name="log-dir" value="/usr/local/freeswitch/log/xml_cdr"/>
-    <param name="log-http-and-disk" value="true"/>
+    <param name="log-http-and-disk" value="false"/>
 
     <!-- encode=false：plain XML（便于 dump 做 fixture、便于人工排查）。
          解析端按 cdr 表单字段取原始 XML 文本。 -->

@@ -508,3 +508,38 @@
       —— 先看 SQL 里的 INSERT 列清单，不要去看 DDL。
     - **附带教训**：`1054` 属于 `OperationalError`（不是 `ProgrammingError`），
       按异常类型归类会把排查方向带偏。
+
+77. **扣款入口不能挂在 ESL 事件路径上 —— 降级会连坐扣款（2026-09-14 实测，缺陷已修）**：
+    - **现象**：`cdr.cost` 有值、`rate_used` 有值，但 `billed` 恒为 0、`account_ledger` 无新行、
+      余额长期不降。更隐蔽的后果：**欠费停呼（603）永不触发** —— 余额不降，
+      `_check_balance_allowed` 的 `balance + credit_limit - min_balance` 恒 > 0。
+    - **根因**：`esl_client._save_cdr` 有降级分支 `_degraded = rec.get("answer_time") is None`
+      （事件未带 answer_time → 通道变量不全 → talk/cost 算不出）；而**唯一**扣款入口的条件是
+      `settings.get("prepaid_enabled") and rec.get("answer_time") and cost and cost > 0`
+      → 降级时后两项皆空 → **条件永假，扣款永不执行**。
+      金额与归属随后由 XML 真源 / reconcile **补算**，但**补算路径不调扣款**。
+    - **三层掩盖**：① `_degraded` 只用于保护金额列（`preserve_cols`）**无日志**；
+      ② `_charge_account` 返回 False **完全静默**；③ DB 里补算好的字段让肉眼查看一切正常，
+      **唯一异常只剩 `billed` 永不置 1**。
+    - **修法**：新增 `sweep_unbilled_charges()` —— 改按 **CDR 终态**
+      （`billed=0 AND cost>0 AND account_id IS NOT NULL`）判定扣款，不依赖事件路径；
+      触发点 ① `/fs/cdr` 补算成功后（近实时）② reconcile 循环（兜底 + 补历史欠账）。
+      原降级逻辑不动。
+    - **幂等已实测**：两个网关实例并发扫描同一批 CDR，靠
+      `account_ledger.uk_ledger_cdr` 唯一键 + `UPDATE ... WHERE billed=0` 双保险，
+      实际只扣一次（13 笔而非 26 笔）。
+    - **规则（可推广）**：**「何时扣款」要挂在「数据何时确定」，不要挂在「数据从哪条路径来」。**
+
+78. **别把代码里的默认参数当成运行时值（2026-09-14 实测，同日因此连错 3 处）**：
+    - **现象**：把 `settings.get("prepaid_enabled", False)` 的 `False` 当成"当前开关是关的"，
+      进而推出"全表 billed=0""出局没真扣款"等一连串错误结论。
+    - **正解**：默认参数**只在键缺失时生效**。取值必须问运行时：
+      `docker exec -w /app/src -e PYTHONPATH=/app/src <容器> python -c "from core.config import settings; print(settings.get('<key>'))"`
+    - **同理**：DB 字段的 `default=0`（如 `credit_limit`）也只是缺省值，**真实值要查库**
+      —— 本例 8004 的 `credit_limit` 实为 **1000** 而非 0，故余额 −3.4 属**设计内透支**，
+      不是"无余额下限保护"。
+    - **附带更正**：`_charge_account` **不检查** `credit_limit` 是**正确分工**，别误判成漏洞 ——
+      额度闸门在**拨号前**（`_check_balance_allowed`）；扣款发生在通话结束后，
+      账单已产生，**必须记账，不能因额度不足拒记**（否则直接漏账）。
+    - **规则**：凡**当前值**（开关、余额、额度、状态）**一律实测**，不从代码/注释推断；
+      代码只能告诉你"结构"，不能告诉你"状态"。

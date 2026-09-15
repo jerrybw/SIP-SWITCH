@@ -267,6 +267,11 @@ def _reconcile_pass() -> None:
     - Redis 层（P2-a）：泄漏凭证释放 + 全量校准。两轮共用同一 live 快照。
     """
     from fs_esl_cmd import esl_api
+    # 计费补偿扫描：按 CDR 终态补扣（不依赖事件路径；补历史欠账也走这里）
+    try:
+        sweep_unbilled_charges()
+    except Exception as _e:  # noqa: BLE001
+        print("[reconcile] billing sweep error: %s" % _e, flush=True)
     raw = esl_api("show channels")
     if raw is None:
         return  # ESL 查询不可用：宁可不修也不猜
@@ -807,6 +812,10 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
     # （网关重启丢 _call_store 时 HANGUP_COMPLETE 走 minimal rec 分支），此时 talk/cost
     # 必然算不出来。不加保护的话，整行 upsert 会把 XML CDR 真源已算好的金额清零。
     _degraded = rec.get("answer_time") is None
+    if _degraded:
+        # 观察点：降级会连坐「扣款」（条件里的 rec.answer_time/cost 皆空），
+        # 扣款改由 sweep_unbilled_charges 在 CDR 终态落定后补偿。
+        print("[billing] degraded rec uuid=%s: no answer_time -> talk/cost skipped, charge deferred" % call_uuid, flush=True)
 
     # v0.3：当通消费(收入侧) + 当通成本(成本侧) + 账户维度解析（仅接通计费；费率链见 _compute_billing）
     cost, rate_used, account_id, business_id, customer_id, cost_price, cost_rate_used, cost_bill_unit = _compute_billing(rec, talk, bill)
@@ -931,6 +940,10 @@ def _save_cdr(call_uuid: str, rec: dict, event) -> None:
         try:
             if settings.get("prepaid_enabled", False) and rec.get("answer_time") and cost and cost > 0:
                 _charge_account(cdr.uuid, cost)
+            elif settings.get("prepaid_enabled", False) and _degraded:
+                # 降级路径跳过扣款（answer_time/cost 为空）。不在此硬补：
+                # 金额/归属尚未落定，交给 sweep_unbilled_charges 按终态补扣。
+                print("[billing] skip charge (degraded) uuid=%s -> deferred to sweep" % cdr.uuid, flush=True)
         except Exception as e:
             print("[billing] charge account failed (uuid=%s): %s" % (cdr.uuid, e))
         # v0.3.1 成本侧：运营商余额扣减（**始终扣费**，不依赖 prepaid_enabled，不拦截）。
@@ -1400,6 +1413,46 @@ def _compute_billing(rec, talk, bill):
     return cost, rate_used, account_id, business_id, customer_id, cost_price, cost_rate_used, cost_bill_unit
 
 
+def sweep_unbilled_charges(limit: int = 200) -> int:
+    """补偿扫描：对「已落终态、有消费、未扣款」的 CDR 补扣账户余额（幂等）。
+
+    背景（PITFALLS #77）：扣款入口 _persist_and_charge 挂在 ESL 事件路径上，
+    其条件依赖 rec.answer_time / cost；当该路径降级（rec 缺字段）时条件永假，
+    扣款被整体跳过。而 CDR 的金额与归属随后由 XML 真源 / reconcile 补算，
+    **补算路径不扣款** —— 于是「账不平」，且「欠费停呼」永不触发。
+
+    故此处改按 **CDR 终态**（billed=0 且 cost>0 且 account_id 非空）判定扣款，
+    是唯一可靠入口。
+
+    幂等双保险：account_ledger.uk_ledger_cdr 唯一键 + UPDATE ... WHERE billed=0
+    （均在 _charge_account 内）。可安全重复执行；也用于补历史欠账。
+    """
+    if not settings.get("prepaid_enabled", False):
+        return 0
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            select(Cdr.uuid, Cdr.cost)
+            .where(Cdr.billed == 0, Cdr.cost > 0, Cdr.account_id.isnot(None))
+            .order_by(Cdr.id.desc()).limit(limit)
+        ).all()
+    except Exception as e:  # noqa: BLE001
+        print("[billing] sweep query failed: %s" % e, flush=True)
+        return 0
+    finally:
+        db.close()
+    n = 0
+    for _uuid, _cost in rows:
+        try:
+            if _charge_account(_uuid, _cost):
+                n += 1
+        except Exception as e:  # noqa: BLE001
+            print("[billing] sweep charge failed (uuid=%s): %s" % (_uuid, e), flush=True)
+    if n:
+        print("[billing] sweep charged %d CDR(s)" % n, flush=True)
+    return n
+
+
 def _charge_account(cdr_uuid: str, cost) -> bool:
     """v0.3 预付费：通话落库后扣减账户余额并写流水。
 
@@ -1423,6 +1476,7 @@ def _charge_account(cdr_uuid: str, cost) -> bool:
         if billed == 1:
             return False  # 已扣，跳过
         if account_id is None:
+            print("[billing] charge skip: no account_id uuid=%s" % cdr_uuid, flush=True)
             return False
         # 行锁账户，避免并发余额竞态
         acc = db.get(Account, account_id, with_for_update=True)
