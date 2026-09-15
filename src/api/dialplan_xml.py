@@ -58,7 +58,11 @@ def build_allow_xml(callee: str, access_point_id=None, bill_unit=60, caller_type
     """放行：复刻 Local_Extension 的 bridge（含自动录音）。
 
     access_point_id / bill_unit 由路由层解析接入点后透传，供 CDR 关联（T-207）。
-    account_id：话机注册呼叫（无接入点）时显式下发归属账户，使内线互拨也能落 account_id 并计费。
+    account_id：话机注册呼叫（无接入点）时显式下发归属账户，使内线互拨也能落 account_id（便于报表归属）。
+
+    ⚠️ 内线互拨【不计费】（业务口径，2026-09-14 拍板）：本函数刻意不下发 cdr_caller_mid /
+    cdr_callee_mid，内线费率链因此解析不到 → cost=0，属【期望行为】，请勿"补齐"。
+    （原 docstring 写"并计费"，与口径相反，2026-09-15 更正。）
     """
     rec = "rec_file=%s/${uuid}.wav" % _REC_DIR
     rec_session_data = "${rec_file}"
