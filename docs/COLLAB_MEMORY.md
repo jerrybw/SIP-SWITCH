@@ -80,6 +80,18 @@ Co-authored-by: <agent-name> <agent-name>@agent.local
 4. `/fs/*` 已启用 HTTP Basic 认证（fail-closed）：凭据在 `.env` XMLCURL_* 与两个 config_settings.yaml `[xml_curl]` 段（node1/node2）**三处同值**，改配置勿删
 5. `/fs/*` 外部 curl 无凭据 → 401（正常，不是故障）；管理端裸 curl cookie 写 `/api/*` → 403（CSRF 同源校验，脚本请带 Authorization/Origin 头）
 
+6. **改了 `src/` 必须重建镜像才生效；且「验收通过」≠「运行环境已更新」（2026-09-15 立）**：
+   - 网关 `src/` 是 **COPY 进镜像**（非挂载）。改代码后**必须**
+     `docker compose build gateway gateway2 && docker compose up -d --no-deps gateway gateway2`。
+     ⚠️ **裸跑 `docker compose build` 会连带重建 FS（30–60 min）** —— 永远显式指定服务名。
+   - ⚠️ **验收方式 ≠ 交付方式**：验收通常用「**挂载代码的一次性容器 + 独立库**」
+     （`docker run -v <代码>:/app ...`、隔离库 `sip_e2e`），它证明**代码正确**，
+     但**不会更新任何常驻容器**。凡「合入 / 交付 / 验收通过」后，**必须显式让运行容器与 HEAD 对齐**，
+     并核验两项：① `md5sum` 比对（仓库 vs 容器内 `/app/src/...`）；② 启动日志迁移行
+     （如 `[migrate] roles / role_perm tables ensured`）。
+   - **反例（本次）**：2026-09-15 M3P2 已合入并推送 `cd3caf4`，但 dev 容器仍是 12h 前镜像
+     （`src/api/roles.py` 不存在、`app.py`/`admin.js` 的 md5 与仓库不符）→ **用户测不到**才发现此缺口。
+
 ## 7. 三方协作现状与进度快照（2026-09-13 傍晚，接手必读）
 
 > 本节是**快照**，会过时；**待办事实源仍以 `docs/ROADMAP.md` 为准（以代码验证，禁凭记忆推演）**。
