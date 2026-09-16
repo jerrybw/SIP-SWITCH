@@ -1,6 +1,6 @@
 # COLLAB_MEMORY — 协作记忆与资产密级约定
 
-> **版本**：v1.1（2026-09-12，作者 @WorkBuddy；v1.1 增补提交归因与 token 纪律）
+> **版本**：v1.2（2026-09-16，作者 @WorkBuddy；v1.2 补齐 §4 模块 Owner 责任表 + 关键路径冻结表）
 > **定位**：仓内协作记忆的唯一入口。配合 `docs/ROADMAP.md`（进度唯一事实源）与 `docs/PITFALLS.md`（避坑合集，append-only）使用。多 Agent 协作规范全文见 **`docs/多agent协作方案.md`**（v1.1，2026-09-13 入仓；此前置于仓外 `/root/src/` 时曾被误删，入仓后受 git 历史保护）。
 
 ## 1. 资产密级三级约定
@@ -48,15 +48,52 @@ Co-authored-by: <agent-name> <agent-name>@agent.local
 
 **明确不采纳**（2026-09-12 评审，@WorkBuddy）：MCP 权限网关（GitBlinder/service-gator，当前 token 纪律已等效覆盖且更严）、Cursor Origin（Beta/规模不匹配）、自托管 GitLab/Gitea（运维负担）、平台迁移（成本纯损失）。完整论证见《多 Agent 协作开发方案》v1.1 §2。
 
-## 4. 模块 Owner（v1.0 骨架，随并行开发补齐）
+## 4. 模块 Owner（v1.2 —— 2026-09-16 由 @WorkBuddy 补齐，取代 v1.0 空骨架）
 
-| 模块 | Owner | 说明 |
-|------|-------|------|
-| `api/app.py` 路由/选路 | （待派） | dialplan 预检/预留、P2-c 重排 |
-| `esl_client.py` ESL/CDR/计费 | （待派） | 事件异步化、reconcile |
-| `fs_sofia_config.py` / `fs_provision.py` FS 对接层 | （待派） | 机制 A 下发；**此层单一 Owner**，见协作方案 §6 |
-| `concurrency.py` 并发预留 | （待派） | P2-a Redis Lua |
-| 前端 `static/` | （待派） | SECTIONS 驱动 |
+> **Owner 的含义（务必先读）**：Owner ≠ 产权，而是**变更责任 + 冲突仲裁人**。
+> 具体三条：(1) 该模块的改动**先与 Owner 对齐**再动手；(2) 模块位于关键路径（§4.2）时，
+> **同一时刻只允许一个 Agent 写**，其他人改走「提方案 → Owner 实施」；
+> (3) 出现跨模块接口分歧时，Owner 的意见优先，解决不了升级给用户。
+> **Owner 与「谁在做」是两回事** —— 当前实际开发者可能是任意 Agent（见 §7 快照），
+> 但**责任与仲裁固定在人**，否则并行时无人对回归负责。
+
+### 4.1 分模块责任表
+
+| # | 模块（文件） | Owner | 职责范围 | 关键路径 |
+|---|---|---|---|---|
+| M1 | `src/fs_sofia_config.py`、`src/fs_provision.py`、`src/gw_state.py`、`src/phone_sync.py` | **@WorkBuddy** | FS 对接层：**机制 A（不落盘）** 的 XML 生成与下发、网关增删改的跨节点信令（`provision_seq`/`provision_pending`）、`sofia::gateway_state` 事件消费与注册状态回写、话机同步 | **是**（§4.2） |
+| M2 | `src/esl_client.py`、`src/cdr_truth.py`、`src/api/billing.py` | **@WorkBuddy** | ESL 连接与事件循环、CDR 落库与 **mod_xml_cdr 真源补算**、计费扣款 | **是**（§4.2） |
+| M3 | `src/api/app.py`（**冻结**）、`src/route/service.py`、`src/rules/`、`src/concurrency.py` | **@WorkBuddy** | **`app.py` 冻结，改动权归维护者**（`ROADMAP` 2026-09-11 约定）；并发**预检**（P2-a Redis Lua）与并发**选路因子**（P2-c 打标）；主被叫规则过滤（`_filter_candidates_by_gw_rules`）与候选池排序 | **是**（§4.2） |
+| M4 | `src/api/dialplan_xml.py`、`src/api/directory_xml.py`、`src/api/fs_auth.py` | **@WorkBuddy** | xml_curl 出口：拨号计划、动态目录、`/fs/*` 的 HTTP Basic 认证（fail-closed） | **是**（§4.2） |
+| M5 | `src/api/auth.py`、`authz.py`、`users.py`、`roles.py`、`csrf.py`、`oplog.py` | **@WorkBuddy**（M3P2 实施：@zcode） | 登录/会话、角色三档与权限矩阵、用户 CRUD、CSRF 同源校验、操作日志埋点 | **是**（§4.2，涉权限判定） |
+| M6 | `src/db/migrate.py`、`src/db/models.py`、`src/db/session.py` | **@WorkBuddy** | schema 演进。**改动先报备**：两边都往尾部追加，**串行合入**，后合方 rebase | **是**（§4.2） |
+| M7 | `src/core/`（`config.py`/`redis_client.py`/`sys_setting.py`/`pw_hash.py`/`lru_cache.py`） | **@WorkBuddy** | 配置加载与热更、Redis 客户端、`system_setting` 读写、密码哈希 | 是（配置变更影响全站） |
+| M8 | `src/static/`（`admin.js`/`admin.css`）、`src/templates/index.html` | **@WorkBuddy** | 管理端前端。**M3 独占**：同一时刻单一写入者；`index.html` 的 `?v=` 缓存号由**最后合入 main 的一方** bump 一次 | 否，但**冲突面最大** |
+| M9 | `src/node_health.py`、`src/heartbeat.py`、`src/alerting.py` | **@WorkBuddy** | FS 节点健康探测与僵尸治理、落地网关心跳、告警出口（`operation_log` 去重 + webhook 外推） | 否 |
+| M10 | `src/recordings.py`、`src/api/live_calls.py`、`src/api/cdr_export.py` | **@WorkBuddy** | 录音 URI 抽象（`local://`/`cos://`）、在途通话视图、话单/账单导出 | 否 |
+| M11 | `src/api/sys_config.py`、`src/api/accounts.py`、`src/api/crud.py` | **@WorkBuddy** | 系统设置（含 schema 校验）、账户与网关 CRUD、通用实体兜底路由 | 否 |
+| M12 | `tests/`、`deploy/`、`docker-compose*.yml`、`dev-up.sh`、`deploy.sh` | **@WorkBuddy** | 测试夹具与用例、部署脚本与 compose 基线、密钥生成（密钥仅部署时生成，不入仓） | 否 |
+
+### 4.2 关键路径冻结表（比 Owner 更硬的一层约束）
+
+以下文件属于**多人并行时最易互相踩踏**的面。规则：**同一时刻只允许一个 Agent 持有写权**，
+其余 Agent 一律「提出方案 → 交由当前持有者实施」；持有者变更须在群内周知。
+
+| 文件 | 为什么关键 | 约束来源 |
+|---|---|---|
+| `src/api/app.py` | 全站路由注册点，所有 router/中间件挂载处；改动易致路由被兜底吞掉（PITFALLS #34） | `ROADMAP` 2026-09-11「app.py 冻结」 |
+| `src/db/migrate.py` | schema 演进的唯一入口，多人同时追加必冲突 | `ROADMAP` 2026-09-12「migrate 报备」 |
+| `src/static/admin.js` | 前端冲突面最大（M3 用户管理、P2 并发打标都曾想动它） | `ROADMAP` 2026-09-12「M3 独占」 |
+| `src/templates/index.html` | 含 `?v=` 缓存版本号，多人同 bump 会互相覆盖 | 同上，「最后合入方 bump」 |
+| M1 的 FS 对接层 | 机制 A 的**单一下发出口**，多写者会造出重复/冲突的 XML | 本文档 v1.0 起即定「此层单一 Owner」 |
+
+### 4.3 未分派 / 待定
+
+| 项 | 说明 |
+|---|---|
+| **`skills/` 与 `docs/`（除 ROADMAP/PITFALLS）** | 文档类无 Owner 也有事实仲裁人：`ROADMAP.md` 进度口径 = @WorkBuddy；`PITFALLS.md` **append-only**，任何人可追加、**不可改写历史条目**（删除仅限含敏感信息者，须记录原因） |
+| **M4 压测脚本（T-401~404）** | ❌ 未实现，故无 Owner；一旦开工须先定 Owner（`ROADMAP` §10 待拍板 #3 未决，DEV 单机跑不了真实规格） |
+| **T-501 FS 集群分发** | **已拍板不做**（2026-09-15，走 VOS500 类架构，只保多节点数据同步）——**不设 Owner**，避免复活 |
 
 ## 5. 新 Agent 入职清单
 
@@ -92,9 +129,18 @@ Co-authored-by: <agent-name> <agent-name>@agent.local
    - **反例（本次）**：2026-09-15 M3P2 已合入并推送 `cd3caf4`，但 dev 容器仍是 12h 前镜像
      （`src/api/roles.py` 不存在、`app.py`/`admin.js` 的 md5 与仓库不符）→ **用户测不到**才发现此缺口。
 
-## 7. 三方协作现状与进度快照（2026-09-13 傍晚，接手必读）
+## 7. 三方协作现状与进度快照（2026-09-13 傍晚 —— ⚠️ 已过期，见 §7.1 更正）
 
 > 本节是**快照**，会过时；**待办事实源仍以 `docs/ROADMAP.md` 为准（以代码验证，禁凭记忆推演）**。
+
+**§7.1 快照更正（2026-09-16 @WorkBuddy 实测，读下表前先看这里）**：下表已落后 3 天，实测偏差如下 ——
+
+- 仓 HEAD = **`7d23898`**（不再是 §7 提到的 `16b6ca7`），`origin/main` **同点 0/0**，工作区干净；
+  **当前待推 = 0**（§7 写的「18 commit 待推」已全部推完）。
+- **M3 Phase 2**（自定义角色 + 权限矩阵）**已交付并推送**（2026-09-14）；§7 表里 zcode「正在写 P2」的描述已作废。
+- **P1 CDR 真源 / P2 并发预检** 均已合入 main（见 `ROADMAP` 2026-09-13 两节）。
+- §7 写的「未拍板：多 Agent 互相派发」——已演进为独立项目，见 `docs/多agent协作方案.md` 与 `multi-agent-task-chain-orchestration` skill。
+- **Module Owner 已于 2026-09-16 补齐**（见本文档 **§4**），不再有「（待派）」空项。
 
 | 方 | 沙箱账户 | 工作区 | 栈权限 | 当前状态 |
 |---|---|---|---|---|
